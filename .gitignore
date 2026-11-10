@@ -1,3 +1,4 @@
 output/
 settings.json
 __pycache__/
+.env
