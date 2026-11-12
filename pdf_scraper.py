@@ -139,6 +139,8 @@ def scrape_inpage_by_api(page: Page, document_name: str) -> Path:
         except ValueError:
             width = 1600
         images: list[bytes] = []
+        if config.API_CONCURRENCY <= 0:
+            raise ValueError("config.API_CONCURRENCY must be greater than zero")
 
         endpoints = []
         for page_number in range(first_page, first_page + total_pages):
@@ -154,8 +156,10 @@ def scrape_inpage_by_api(page: Page, document_name: str) -> Path:
                 "https://drive.google.com/viewer/img?" + urlencode(request_params)
             )
 
-        for batch_start in range(0, len(endpoints), 6):
-            batch_endpoints = endpoints[batch_start : batch_start + 6]
+        for batch_start in range(0, len(endpoints), config.API_CONCURRENCY):
+            batch_endpoints = endpoints[
+                batch_start : batch_start + config.API_CONCURRENCY
+            ]
             responses = fetch_image_batch(page, batch_endpoints)
             stop_after_batch = False
 
@@ -192,8 +196,8 @@ def scrape_inpage_by_api(page: Page, document_name: str) -> Path:
     finally:
         scrape_progress.finish()
 
-def direct_download(file_id: str, document_name: str) -> Path:
-    """Download a Google Drive file directly and return the saved path."""
+def direct_download(file_id: str, document_name: str) -> tuple[Path, int]:
+    """Download a Google Drive file directly and return its path and status."""
     if not file_id or not file_id.strip():
         raise ValueError("fileID must be a non-empty string")
     endpoint = "https://drive.usercontent.google.com/download"
@@ -207,9 +211,10 @@ def direct_download(file_id: str, document_name: str) -> Path:
     output_path = output_dir / document_name
 
     with urlopen(request) as response:
+        response_status = response.status
         output_path.write_bytes(response.read())
 
-    return output_path
+    return output_path, response_status
 
 
 if __name__ == "__main__":
