@@ -12,9 +12,9 @@ from collections.abc import Callable
 from playwright.sync_api import sync_playwright, Page
 
 
-URL = "https://drive.google.com/file/d/10pYur59yGoU42E1D13YU_rbYModCl9xl/view"
+# URL = "https://drive.google.com/file/d/10pYur59yGoU42E1D13YU_rbYModCl9xl/view"
 # URL = "https://drive.google.com/file/d/1EJoTKt46BQEUCcPzq6Lr8qeReSwVnmdS/view"
-# URL = "https://docs.google.com/document/d/1ooiZX0ZdLv9TtSYz2jWddFpjvEDO3BjU7H6NHAJ_wZM/edit?usp=drive_link"
+URL = "https://docs.google.com/document/d/1ooiZX0ZdLv9TtSYz2jWddFpjvEDO3BjU7H6NHAJ_wZM/edit?usp=drive_link"
 # URL = "https://docs.google.com/document/d/11yeLYINhjmqYRksCBH9S8p8W52nHw8UQ/edit"
 # URL = "https://www.scribd.com/document/524804738/Math-With-Bad-Drawings?_gl=1*134viz*_up*MQ..*_ga*MTc4MzIwMzM4LjE3OTQ0MjA4MDQ.*_ga_Z4ZC50DED6*czE3OTQ0MjA4MDMkbzEkZzEkdDE3OTQ0MjA4MDMkajYwJGwwJGgw*_ga_8KZ8BV0P5W*czE3OTQ0MjA4MDMkbzEkZzEkdDE3OTQ0MjA4MDMkajYwJGwwJGgw"
 # URL = "https://docs.google.com/spreadsheets/d/1v6I-Xo8MW7ArQe41mYa23jGZSQ3mJwDIXq3UMIdhWW8/edit?usp=drive_link"
@@ -185,7 +185,6 @@ with sync_playwright() as playwright:
     try:
         page = browser.new_page(
             accept_downloads=True,
-            viewport=config.screenshot_viewport(),
         )
         source_url = URL
         page.goto(source_url, wait_until="domcontentloaded")

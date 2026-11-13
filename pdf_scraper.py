@@ -1,6 +1,5 @@
 import config
 import base64
-import json
 from html.parser import HTMLParser
 from pathlib import Path
 from functools import partial
@@ -19,11 +18,7 @@ from playwright.sync_api import Browser, ConsoleMessage, Page, sync_playwright
 
 from tracker import scrape_progress
 
-script = (
-    (Path(__file__).parent / "scripts/ggdrive_pdf.js")
-    .read_text(encoding="utf-8")
-    .replace("__SCREENSHOT_RESOLUTION__", json.dumps(config.SCREENSHOT_RESOLUTION))
-)
+script = (Path(__file__).parent / "scripts/ggdrive_pdf.js").read_text(encoding="utf-8")
 PAGE_SCRAPED_MARKER = "__PDF_SCRAPER_PAGE_SCRAPED__"
 
 
@@ -60,7 +55,6 @@ def scrape_in_url_by_script(URL: str) -> Path:
         try:
             page = browser.new_page(
                 accept_downloads=True,
-                viewport=config.screenshot_viewport(),
             )
             page.goto(URL, wait_until="domcontentloaded")
             template = Template(page, URL)

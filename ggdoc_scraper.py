@@ -1,5 +1,4 @@
 import base64
-import json
 import re
 from functools import partial
 from pathlib import Path
@@ -17,11 +16,7 @@ from process_images import (
 from template_info import Template
 from tracker import scrape_progress
 
-script = (
-    (Path(__file__).parent / "scripts/ggdrive_ms_word.js")
-    .read_text(encoding="utf-8")
-    .replace("__SCREENSHOT_RESOLUTION__", json.dumps(config.SCREENSHOT_RESOLUTION))
-)
+script = (Path(__file__).parent / "scripts/ggdrive_ms_word.js").read_text(encoding="utf-8")
 PAGE_SCRAPED_MARKER = "__PDF_SCRAPER_PAGE_SCRAPED__"
 
 
@@ -65,7 +60,6 @@ def scrape_in_url_by_script(URL: str) -> Path:
         try:
             page = browser.new_page(
                 accept_downloads=True,
-                viewport=config.screenshot_viewport(),
             )
             page.goto(URL, wait_until="domcontentloaded")
             template = Template(page, URL)

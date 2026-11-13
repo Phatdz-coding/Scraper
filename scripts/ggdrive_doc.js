@@ -4,28 +4,6 @@
   const IMG_SELECTOR = 'img[src^="blob:"]';
   const MIN_DIMENSION = 100;
   const JPEG_QUALITY = 0.92;
-  const SCREENSHOT_RESOLUTION = __SCREENSHOT_RESOLUTION__;
-
-  function getCaptureDimensions(width, height) {
-    if (!SCREENSHOT_RESOLUTION) {
-      return { width, height };
-    }
-
-    const match = SCREENSHOT_RESOLUTION.match(/^(\d+)\s*x\s*(\d+)$/i);
-    if (!match || Number(match[1]) <= 0 || Number(match[2]) <= 0) {
-      throw new Error("SCREENSHOT_RESOLUTION must use the WIDTHxHEIGHT format");
-    }
-
-    const scale = Math.min(
-      1,
-      Number(match[1]) / width,
-      Number(match[2]) / height
-    );
-    return {
-      width: Math.max(1, Math.round(width * scale)),
-      height: Math.max(1, Math.round(height * scale)),
-    };
-  }
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -128,10 +106,9 @@
 
   // --- Capture a single element to a JPEG data URL ---
   function captureElement(el) {
-    const sourceWidth = el.naturalWidth || el.width || el.clientWidth;
-    const sourceHeight = el.naturalHeight || el.height || el.clientHeight;
-    if (sourceWidth < MIN_DIMENSION || sourceHeight < MIN_DIMENSION) return null;
-    const { width, height } = getCaptureDimensions(sourceWidth, sourceHeight);
+    const width = el.naturalWidth || el.width || el.clientWidth;
+    const height = el.naturalHeight || el.height || el.clientHeight;
+    if (width < MIN_DIMENSION || height < MIN_DIMENSION) return null;
 
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d");

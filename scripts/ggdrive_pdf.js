@@ -1,27 +1,5 @@
 (function() {
   const IMG_SELECTOR = 'img[src^="blob:"]';
-  const SCREENSHOT_RESOLUTION = __SCREENSHOT_RESOLUTION__;
-
-  const getCaptureDimensions = function(width, height) {
-    if (!SCREENSHOT_RESOLUTION) {
-      return { width, height };
-    }
-
-    const match = SCREENSHOT_RESOLUTION.match(/^(\d+)\s*x\s*(\d+)$/i);
-    if (!match || Number(match[1]) <= 0 || Number(match[2]) <= 0) {
-      throw new Error('SCREENSHOT_RESOLUTION must use the WIDTHxHEIGHT format');
-    }
-
-    const scale = Math.min(
-      1,
-      Number(match[1]) / width,
-      Number(match[2]) / height
-    );
-    return {
-      width: Math.max(1, Math.round(width * scale)),
-      height: Math.max(1, Math.round(height * scale)),
-    };
-  };
 
   const getPages = function() {
     const images = [...document.querySelectorAll(IMG_SELECTOR)];
@@ -61,9 +39,8 @@
     await resetViewerToFirstPage();
     for(const page of getPages()) {
       const img = await getImage(page);
-      const sourceWidth = img.naturalWidth;
-      const sourceHeight = img.naturalHeight;
-      const { width, height } = getCaptureDimensions(sourceWidth, sourceHeight);
+      const width = img.naturalWidth;
+      const height = img.naturalHeight;
 
       if(!pdf) {
         pdf = new jsPDF({ unit: 'px', format: [width, height] });

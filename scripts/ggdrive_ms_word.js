@@ -7,34 +7,12 @@ This script only works if the page url is:
 (function() {
   // Page placeholders: any <div> whose style attribute contains "padding-bottom:"
   const PAGE_SELECTOR = 'div[style*="padding-bottom:"]';
-  const SCREENSHOT_RESOLUTION = __SCREENSHOT_RESOLUTION__;
   const LOAD_TIMEOUT_MS = 15000;
   const POLL_MS = 30;          // how often to check whether a page has loaded
   const MAX_PENDING = 4;       // max pages being encoded in the background at once
   const JPEG_QUALITY = 0.92;   // 1.0 is much slower and gives huge files for almost no visible gain
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-  const getCaptureDimensions = function(width, height) {
-    if (!SCREENSHOT_RESOLUTION) {
-      return { width, height };
-    }
-
-    const match = SCREENSHOT_RESOLUTION.match(/^(\d+)\s*x\s*(\d+)$/i);
-    if (!match || Number(match[1]) <= 0 || Number(match[2]) <= 0) {
-      throw new Error('SCREENSHOT_RESOLUTION must use the WIDTHxHEIGHT format');
-    }
-
-    const scale = Math.min(
-      1,
-      Number(match[1]) / width,
-      Number(match[2]) / height
-    );
-    return {
-      width: Math.max(1, Math.round(width * scale)),
-      height: Math.max(1, Math.round(height * scale)),
-    };
-  };
 
   // Group matching divs by parent and take the parent holding the most of them.
   const getPages = function() {
@@ -148,13 +126,12 @@ This script only works if the page url is:
   });
 
   const encodePage = function(drawable) {
-    const { width, height } = getCaptureDimensions(drawable.width, drawable.height);
+    const { width, height } = drawable;
 
-    // Fast path: if the page image is already a JPEG and no resizing is needed,
-    // reuse its bytes as they are instead of decoding and re-encoding.
+    // Fast path: if the page image is already a JPEG, reuse its bytes as they
+    // are instead of decoding and re-encoding.
     // The fetch must start right now, before the viewer can revoke the blob URL.
-    const canReuse = drawable.url && width === drawable.width && height === drawable.height;
-    const rawJpeg = canReuse
+    const rawJpeg = drawable.url
       ? fetch(drawable.url).then(r => r.blob()).then(b => (b.type === 'image/jpeg' ? b : null)).catch(() => null)
       : Promise.resolve(null);
 
