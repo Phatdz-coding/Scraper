@@ -1,5 +1,6 @@
 import config
 import base64
+import json
 from html.parser import HTMLParser
 from pathlib import Path
 from functools import partial
@@ -18,7 +19,11 @@ from playwright.sync_api import Browser, ConsoleMessage, Page, sync_playwright
 
 from tracker import scrape_progress
 
-script = (Path(__file__).parent / "scripts/ggdrive_pdf.js").read_text(encoding="utf-8")
+script = (
+    (Path(__file__).parent / "scripts/ggdrive_pdf.js")
+    .read_text(encoding="utf-8")
+    .replace("__SCREENSHOT_RESOLUTION__", json.dumps(config.SCREENSHOT_RESOLUTION))
+)
 PAGE_SCRAPED_MARKER = "__PDF_SCRAPER_PAGE_SCRAPED__"
 
 
@@ -53,7 +58,10 @@ def scrape_in_url_by_script(URL: str) -> Path:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         try:
-            page = browser.new_page(accept_downloads=True)
+            page = browser.new_page(
+                accept_downloads=True,
+                viewport=config.screenshot_viewport(),
+            )
             page.goto(URL, wait_until="domcontentloaded")
             template = Template(page, URL)
             total_pages = template.get_total_pages()
@@ -135,7 +143,10 @@ def scrape_inpage_by_api(page: Page, document_name: str) -> Path:
 
         first_page = int(viewer_params.get("page", "0"))
         try:
-            width = max(int(viewer_params.get("w", "1600")), 1600)
+            width = max(
+                int(viewer_params.get("w", "1600")),
+                1600,
+            )
         except ValueError:
             width = 1600
         images: list[bytes] = []
@@ -196,7 +207,7 @@ def scrape_inpage_by_api(page: Page, document_name: str) -> Path:
     finally:
         scrape_progress.finish()
 
-def direct_download(file_id: str, document_name: str) -> tuple[Path, int]:
+def direct_download(file_id: str, document_name: str) -> tuple[Path | None, int]:
     """Download a Google Drive file directly and return its path and status."""
     if not file_id or not file_id.strip():
         raise ValueError("fileID must be a non-empty string")
@@ -212,6 +223,11 @@ def direct_download(file_id: str, document_name: str) -> tuple[Path, int]:
 
     with urlopen(request) as response:
         response_status = response.status
+        content_type = (
+            response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        )
+        if content_type == "text/html":
+            return None, 404
         output_path.write_bytes(response.read())
 
     return output_path, response_status

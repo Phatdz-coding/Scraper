@@ -1,5 +1,27 @@
 (function() {
   const IMG_SELECTOR = 'img[src^="blob:"]';
+  const SCREENSHOT_RESOLUTION = __SCREENSHOT_RESOLUTION__;
+
+  const getCaptureDimensions = function(width, height) {
+    if (!SCREENSHOT_RESOLUTION) {
+      return { width, height };
+    }
+
+    const match = SCREENSHOT_RESOLUTION.match(/^(\d+)\s*x\s*(\d+)$/i);
+    if (!match || Number(match[1]) <= 0 || Number(match[2]) <= 0) {
+      throw new Error('SCREENSHOT_RESOLUTION must use the WIDTHxHEIGHT format');
+    }
+
+    const scale = Math.min(
+      1,
+      Number(match[1]) / width,
+      Number(match[2]) / height
+    );
+    return {
+      width: Math.max(1, Math.round(width * scale)),
+      height: Math.max(1, Math.round(height * scale)),
+    };
+  };
 
   const getPages = function() {
     const images = [...document.querySelectorAll(IMG_SELECTOR)];
@@ -15,14 +37,33 @@
     return [...firstPage.parentElement.querySelectorAll(`:scope > .${CSS.escape(className)}`)];
   }
 
+  const resetViewerToFirstPage = async function() {
+    window.scrollTo(0, 0);
+    if(document.scrollingElement) {
+      document.scrollingElement.scrollTop = 0;
+    }
+
+    // Google Drive commonly scrolls an inner viewer container rather than
+    // the document itself. Reset all scrollable containers so page discovery
+    // cannot start from a currently virtualized later page.
+    for(const element of document.querySelectorAll("*")) {
+      if(element.scrollHeight > element.clientHeight) {
+        element.scrollTop = 0;
+      }
+    }
+    await new Promise(resolve => setTimeout(resolve, 500));
+  };
+
   const buildPDF = async function() {
     let pdf;
 
     // Generate a PDF from images with "blob:" sources.
+    await resetViewerToFirstPage();
     for(const page of getPages()) {
       const img = await getImage(page);
-      const width = img.naturalWidth;
-      const height = img.naturalHeight;
+      const sourceWidth = img.naturalWidth;
+      const sourceHeight = img.naturalHeight;
+      const { width, height } = getCaptureDimensions(sourceWidth, sourceHeight);
 
       if(!pdf) {
         pdf = new jsPDF({ unit: 'px', format: [width, height] });

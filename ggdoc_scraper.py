@@ -1,4 +1,5 @@
 import base64
+import json
 import re
 from functools import partial
 from pathlib import Path
@@ -16,7 +17,11 @@ from process_images import (
 from template_info import Template
 from tracker import scrape_progress
 
-script = (Path(__file__).parent / "scripts/ggdrive_doc.js").read_text(encoding="utf-8")
+script = (
+    (Path(__file__).parent / "scripts/ggdrive_ms_word.js")
+    .read_text(encoding="utf-8")
+    .replace("__SCREENSHOT_RESOLUTION__", json.dumps(config.SCREENSHOT_RESOLUTION))
+)
 PAGE_SCRAPED_MARKER = "__PDF_SCRAPER_PAGE_SCRAPED__"
 
 
@@ -58,7 +63,10 @@ def scrape_in_url_by_script(URL: str) -> Path:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         try:
-            page = browser.new_page(accept_downloads=True)
+            page = browser.new_page(
+                accept_downloads=True,
+                viewport=config.screenshot_viewport(),
+            )
             page.goto(URL, wait_until="domcontentloaded")
             template = Template(page, URL)
             try:
@@ -124,8 +132,8 @@ def scrape_inpage_by_api(page: Page, document_name: str) -> Path:
 
     scrape_progress.reset()
 
-    if not document_name.lower().endswith(".docx"):
-        document_name = document_name + ".docx"
+    if not document_name.lower().endswith(".pdf"):
+        document_name = document_name + ".pdf"
     output_path = destination / document_name
 
     viewer_params: dict[str, str] = {}
@@ -169,7 +177,10 @@ def scrape_inpage_by_api(page: Page, document_name: str) -> Path:
 
         first_page = int(viewer_params.get("page", "0"))
         try:
-            width = max(int(viewer_params.get("w", "1600")), 1600)
+            width = max(
+                int(viewer_params.get("w", "1600")),
+                1600,
+            )
         except ValueError:
             width = 1600
 
