@@ -190,7 +190,7 @@ with sync_playwright() as playwright:
         page.goto(source_url, wait_until="domcontentloaded")
         template_info = Template(page, source_url)
         webtype = template_info.get_website_type(source_url)
-        if webtype == WebsiteType.GOOGLE_DOC:
+        if webtype == WebsiteType.GOOGLE_DOC and "spreadsheet" not in source_url.lower():
             URL = ggdoc_scraper.switch_url_to_AllTabsView(source_url)
             page.goto(URL, wait_until="domcontentloaded")
             template_info = Template(page, URL)
