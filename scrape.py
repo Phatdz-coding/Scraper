@@ -1,20 +1,22 @@
 import pdf_scraper
 import ggdoc_scraper
 import re
+import typer
 from template_info import DocumentType, Template, WebsiteType
 import config
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib.error import HTTPError
 from collections.abc import Callable
+from rich.console import Console
 
 # from pdf_scraper import _download_pdf
 from playwright.sync_api import sync_playwright, Page
 
 
-# URL = "https://drive.google.com/file/d/10pYur59yGoU42E1D13YU_rbYModCl9xl/view"
+URL = "https://drive.google.com/file/d/10pYur59yGoU42E1D13YU_rbYModCl9xl/view"
 # URL = "https://drive.google.com/file/d/1EJoTKt46BQEUCcPzq6Lr8qeReSwVnmdS/view"
-URL = "https://docs.google.com/document/d/1ooiZX0ZdLv9TtSYz2jWddFpjvEDO3BjU7H6NHAJ_wZM/edit?usp=drive_link"
+# URL = "https://docs.google.com/document/d/1ooiZX0ZdLv9TtSYz2jWddFpjvEDO3BjU7H6NHAJ_wZM/edit?usp=drive_link"
 # URL = "https://docs.google.com/document/d/11yeLYINhjmqYRksCBH9S8p8W52nHw8UQ/edit"
 # URL = "https://www.scribd.com/document/524804738/Math-With-Bad-Drawings?_gl=1*134viz*_up*MQ..*_ga*MTc4MzIwMzM4LjE3OTQ0MjA4MDQ.*_ga_Z4ZC50DED6*czE3OTQ0MjA4MDMkbzEkZzEkdDE3OTQ0MjA4MDMkajYwJGwwJGgw*_ga_8KZ8BV0P5W*czE3OTQ0MjA4MDMkbzEkZzEkdDE3OTQ0MjA4MDMkajYwJGwwJGgw"
 # URL = "https://docs.google.com/spreadsheets/d/1v6I-Xo8MW7ArQe41mYa23jGZSQ3mJwDIXq3UMIdhWW8/edit?usp=drive_link"
@@ -88,16 +90,25 @@ def start_scraping(
             return None
 
         try:
-            output_path, status = downloader(file_id, name)
+            with Console().status(
+                f"[bold green]Downloading {name} directly [/bold green]",
+                spinner='dots',
+            ):
+                output_path, status = downloader(file_id, name)
         except HTTPError as error:
             if 400 <= error.code < 500:
+                Console().print("[bold red]Failed to download directly[/bold red]")
                 return None
+            Console().print("[bold red]Failed to download directly[/bold red]")
             raise
 
         if status == 200:
+            Console().print("[bold green]Download successfully[/bold green]")
             return output_path
         if 400 <= status < 500:
+            Console().print("[bold red]Failed to download directly[/bold red]")
             return None
+        Console().print("[bold red]Failed to download directly[/bold red]")
         raise RuntimeError(f"Direct download failed with HTTP {status}")
 
     if template_info.website_type == WebsiteType.GOOGLE_DRIVE:
@@ -181,25 +192,36 @@ def start_scraping(
 
 # open url in new page
 with sync_playwright() as playwright:
-    browser = playwright.chromium.launch()
+    console = Console()
+    with console.status("[green]Initiating browser [/green]", spinner='dots'):
+        browser = playwright.chromium.launch()
+    console.print("[bold green]Browser initialized[/bold green]")
     try:
-        page = browser.new_page(
-            accept_downloads=True,
-        )
+        with console.status("[green]Opening browser page [/green]", spinner='dots'):
+            page = browser.new_page(accept_downloads=True)
+        console.print("[bold green]Browser page opened[/bold green]")
         source_url = URL
-        page.goto(source_url, wait_until="domcontentloaded")
+        with console.status(
+            f"[green]Opening URL:[/green] [bold white]{source_url}[/bold white]",
+            spinner='dots',
+        ):
+            page.goto(source_url, wait_until="domcontentloaded")
+        console.print("[bold green]URL opened[/bold green]")
         template_info = Template(page, source_url)
         webtype = template_info.get_website_type(source_url)
         if webtype == WebsiteType.GOOGLE_DOC and "spreadsheet" not in source_url.lower():
             URL = ggdoc_scraper.switch_url_to_AllTabsView(source_url)
-            page.goto(URL, wait_until="domcontentloaded")
+            with console.status(
+                f"[green]Opening Google Docs view: {URL} [/green]",
+                spinner='dots',
+            ):
+                page.goto(URL, wait_until="domcontentloaded")
+            console.print("[bold green]Google Docs view opened[/bold green]")
             template_info = Template(page, URL)
 
-        print(
-            template_info.website_type,
-            template_info.document_type,
-            template_info.fileID,
-        )
+        file_name = template_info.get_file_name()
+        typer.secho(f"Source URL: {source_url}", fg=typer.colors.BRIGHT_WHITE)
+        typer.secho(f"File name: {file_name}", fg=typer.colors.BRIGHT_WHITE)
 
         # start to scrape
         start_scraping(page, template_info)
