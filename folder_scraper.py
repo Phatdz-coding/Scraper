@@ -115,21 +115,22 @@ def _matches_icon_structure(candidate_htmls: list[str], configured_element: str)
             for child in expected_root
             if child.tag.endswith("rect")
         ]
-        for html in candidate_htmls:
-            try:
-                wrapped = f"<root>{html}</root>"
-                cand_root = ET.fromstring(wrapped)
-                for g_node in cand_root.iter():
-                    if g_node.tag.endswith("g"):
-                        cand_rects = [
-                            {k.lower(): " ".join(v.lower().split()) for k, v in child.attrib.items()}
-                            for child in g_node
-                            if child.tag.endswith("rect")
-                        ]
-                        if cand_rects == expected_rects:
-                            return True
-            except Exception:
-                continue
+        if expected_rects:
+            for html in candidate_htmls:
+                try:
+                    wrapped = f"<root>{html}</root>"
+                    cand_root = ET.fromstring(wrapped)
+                    for g_node in cand_root.iter():
+                        if g_node.tag.endswith("g"):
+                            cand_rects = [
+                                {k.lower(): " ".join(v.lower().split()) for k, v in child.attrib.items()}
+                                for child in g_node
+                                if child.tag.endswith("rect")
+                            ]
+                            if cand_rects == expected_rects:
+                                return True
+                except Exception:
+                    continue
     except Exception:
         pass
 
@@ -143,20 +144,79 @@ def _matches_icon_structure(candidate_htmls: list[str], configured_element: str)
             }
             for r in soup_expected.find_all("rect")
         ]
-        for html in candidate_htmls:
-            soup_cand = BeautifulSoup(html, "html.parser")
-            for g in soup_cand.find_all("g"):
-                c_rects = [
-                    {
-                        k.lower(): " ".join(v.lower().split()) if isinstance(v, str) else v
-                        for k, v in r.attrs.items()
-                    }
-                    for r in g.find_all("rect")
-                ]
-                if c_rects == exp_rects:
-                    return True
+        if exp_rects:
+            for html in candidate_htmls:
+                soup_cand = BeautifulSoup(html, "html.parser")
+                for g in soup_cand.find_all("g"):
+                    c_rects = [
+                        {
+                            k.lower(): " ".join(v.lower().split()) if isinstance(v, str) else v
+                            for k, v in r.attrs.items()
+                        }
+                        for r in g.find_all("rect")
+                    ]
+                    if c_rects == exp_rects:
+                        return True
     except Exception:
         pass
+
+    return False
+
+
+def _matches_icon_geometry(
+    candidate_htmls: list[str],
+    configured_element: str,
+    *,
+    required_path_count: int | None = None,
+    require_rects: bool = True,
+) -> bool:
+    """Match configured SVG icons using stable path geometry and rectangle attributes."""
+    if not configured_element or not candidate_htmls:
+        return False
+
+    try:
+        expected = BeautifulSoup(configured_element, "html.parser")
+        expected_paths = [
+            _normalize_path(path.get("d", ""))
+            for path in expected.find_all("path")
+            if path.get("d")
+        ]
+        expected_rects = [
+            {
+                key.lower(): " ".join(value.lower().split())
+                for key, value in rect.attrs.items()
+                if isinstance(value, str)
+            }
+            for rect in expected.find_all("rect")
+        ]
+        if not expected_paths and not expected_rects:
+            return False
+        required_paths = expected_paths
+        if required_path_count is not None:
+            required_paths = expected_paths[:required_path_count]
+
+        for html in candidate_htmls:
+            candidate = BeautifulSoup(html, "html.parser")
+            candidate_paths = {
+                _normalize_path(path.get("d", ""))
+                for path in candidate.find_all("path")
+                if path.get("d")
+            }
+            if not all(path in candidate_paths for path in required_paths):
+                continue
+
+            candidate_rects = [
+                {
+                    key.lower(): " ".join(value.lower().split())
+                    for key, value in rect.attrs.items()
+                    if isinstance(value, str)
+                }
+                for rect in candidate.find_all("rect")
+            ]
+            if not require_rects or all(rect in candidate_rects for rect in expected_rects):
+                return True
+    except Exception:
+        return False
 
     return False
 
@@ -220,17 +280,24 @@ def is_xlsx(element: DriveElement) -> bool:
 
 
 def is_pptx(element: DriveElement) -> bool:
-    """PPTX element recognized through pattern matching against config.pptx_icon_element."""
+    """PPTX element recognized through its visible SVG geometry."""
     configured = getattr(config, "pptx_icon_element", "")
     _, candidates = _get_icon_data(element)
-    return _matches_icon_structure(candidates, configured)
+    # <use> definitions may be hoisted outside the icon subtree by the browser.
+    # The first two paths are the visible PPTX background and P glyph.
+    return _matches_icon_geometry(
+        candidates,
+        configured,
+        required_path_count=2,
+        require_rects=False,
+    )
 
 
 def is_zip_folder(element: DriveElement) -> bool:
-    """ZIP folder element recognized through pattern matching against config.zip_folder_icon_element."""
+    """ZIP folder element recognized through stable SVG geometry from config.zip_folder_icon_element."""
     configured = getattr(config, "zip_folder_icon_element", "")
     _, candidates = _get_icon_data(element)
-    return _matches_icon_structure(candidates, configured)
+    return _matches_icon_geometry(candidates, configured)
 
 
 def classify_element(element: DriveElement) -> str:
@@ -241,9 +308,9 @@ def classify_element(element: DriveElement) -> str:
     3. microsoft_word
     4. image
     5. xlsx
-    6. pptx
-    7. zip_folder
-    8. folder
+    6. folder
+    7. pptx
+    8. zip_folder
     9. unknown
     """
     if is_pdf(element):
@@ -256,12 +323,12 @@ def classify_element(element: DriveElement) -> str:
         return "image"
     if is_xlsx(element):
         return "xlsx"
+    if is_folder(element):
+        return "folder"
     if is_pptx(element):
         return "pptx"
     if is_zip_folder(element):
         return "zip_folder"
-    if is_folder(element):
-        return "folder"
     return "unknown"
 
 
@@ -585,7 +652,7 @@ def scrape(source: str | Page) -> list[str]:
         raise TypeError(f"Expected source to be str or Page, got {type(source).__name__}")
 
 if __name__ == "__main__":
-    l = scrape("https://drive.google.com/drive/folders/1g__ke0ZPOIrH7DcHocmLDqyltgsnkTjk?usp=drive_link")
+    l = scrape("https://drive.google.com/drive/folders/1MBkJcFyPzuLeCOoMLMo-hGzrM4Yu_lTr")
     for e in l:
         print(e)
     print(len(l))
