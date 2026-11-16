@@ -21,14 +21,14 @@ import typer
 
 import config
 import classifiers
-from classifiers import DriveElement
+from classifiers import DocumentType, DriveElement
 
 console = Console()
 
 
 def log_unsupported_element(file_id: str, tabindex: str | None) -> None:
     """Log unsupported element in orange warning format."""
-    message = f"URL not supported: https://drive.google.com/open?id={file_id}&authuser=0 | Tab Index: {tabindex}"
+    message = f"Unsupported URL: https://drive.google.com/open?id={file_id}&authuser=0 | Tab Index: {tabindex}"
     console.print(f"[bold orange1]{message}[/bold orange1]")
 
 
@@ -224,16 +224,18 @@ class DriveFolderScraper:
         for element in elements:
             label = classifiers.classify_element(element)
 
-            if label == "unknown":
+            if label == DocumentType.UNSUPPORTED_FORMAT:
                 log_unsupported_element(element.data_id, element.tabindex)
                 continue
 
-            if label == "folder":
+            if label == DocumentType.FOLDER:
                 folder_id = element.data_id
                 if folder_id and folder_id not in self.visited_folder_ids:
                     self.visited_folder_ids.add(folder_id)
                     if current_depth + 1 <= max_depth:
-                        folder_url = classifiers.generate_url("folder", folder_id)
+                        folder_url = classifiers.generate_url(
+                            DocumentType.FOLDER, folder_id
+                        )
                         if folder_url:
                             self.queue.append((folder_url, current_depth + 1))
                 continue

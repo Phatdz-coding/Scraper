@@ -2,7 +2,8 @@ import pdf_scraper
 import ggdoc_scraper
 import re
 import typer
-from template_info import DocumentType, Template, WebsiteType
+from classifiers import DocumentType, WebsiteType
+from template_info import Template
 import config
 from pathlib import Path
 from urllib.parse import urlparse
@@ -92,7 +93,7 @@ def start_scraping(
         try:
             with Console().status(
                 f"[bold green]Downloading {name} directly [/bold green]",
-                spinner='dots',
+                spinner="dots",
             ):
                 output_path, status = downloader(file_id, name)
         except HTTPError as error:
@@ -193,27 +194,30 @@ def start_scraping(
 # open url in new page
 with sync_playwright() as playwright:
     console = Console()
-    with console.status("[green]Initiating browser [/green]", spinner='dots'):
+    with console.status("[green]Initiating browser [/green]", spinner="dots"):
         browser = playwright.chromium.launch()
     console.print("[bold green]Browser initialized[/bold green]")
     try:
-        with console.status("[green]Opening browser page [/green]", spinner='dots'):
+        with console.status("[green]Opening browser page [/green]", spinner="dots"):
             page = browser.new_page(accept_downloads=True)
         console.print("[bold green]Browser page opened[/bold green]")
         source_url = URL
         with console.status(
             f"[green]Opening URL:[/green] [bold white]{source_url}[/bold white]",
-            spinner='dots',
+            spinner="dots",
         ):
             page.goto(source_url, wait_until="domcontentloaded")
         console.print("[bold green]URL opened[/bold green]")
         template_info = Template(page, source_url)
         webtype = template_info.get_website_type(source_url)
-        if webtype == WebsiteType.GOOGLE_DOC and "spreadsheet" not in source_url.lower():
+        if (
+            webtype == WebsiteType.GOOGLE_DOC
+            and "spreadsheet" not in source_url.lower()
+        ):
             URL = ggdoc_scraper.switch_url_to_AllTabsView(source_url)
             with console.status(
                 f"[green]Opening Google Docs view: {URL} [/green]",
-                spinner='dots',
+                spinner="dots",
             ):
                 page.goto(URL, wait_until="domcontentloaded")
             console.print("[bold green]Google Docs view opened[/bold green]")
