@@ -8,11 +8,7 @@ error handling.
 from __future__ import annotations
 
 import collections
-import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
 from urllib.parse import urlparse
-
-from bs4 import BeautifulSoup
 from playwright.sync_api import (
     Browser,
     Page,
@@ -24,325 +20,10 @@ from rich.console import Console
 import typer
 
 import config
+import classifiers
+from classifiers import DriveElement
 
 console = Console()
-
-
-@dataclass
-class DriveElement:
-    """Represents an extracted Google Drive item element from the DOM."""
-
-    data_id: str
-    tabindex: str | None = None
-    paths: list[str] = field(default_factory=list)
-    g_elements: list[str] = field(default_factory=list)
-    svg_inners: list[str] = field(default_factory=list)
-    svg_outers: list[str] = field(default_factory=list)
-    raw_html: str = ""
-
-
-def _normalize_path(path_str: str) -> str:
-    """Normalize SVG path d attribute by replacing commas with spaces and collapsing whitespace."""
-    if not path_str:
-        return ""
-    return " ".join(path_str.replace(",", " ").split()).strip()
-
-
-def matches_vector(d: str, expected_vector: str) -> bool:
-    """Check if an SVG path d attribute matches an expected vector."""
-    if not d or not expected_vector:
-        return False
-    if d.strip() == expected_vector.strip():
-        return True
-    return _normalize_path(d) == _normalize_path(expected_vector)
-
-
-def _get_icon_data(element: DriveElement) -> tuple[list[str], list[str]]:
-    """Return (paths, candidate_structures) scoped to the file icon container.
-
-    This ensures that action icons (toolbar buttons, location column folder icons,
-    sharing badges) inside the row do not bleed into element format classification.
-    """
-    if element.raw_html and (
-        "data-file-icon" in element.raw_html
-        or "data-location-column" in element.raw_html
-        or "data-column-field" in element.raw_html
-    ):
-        try:
-            soup = BeautifulSoup(element.raw_html, "html.parser")
-            icon_container = (
-                soup.select_one("[data-file-icon]")
-                or soup.select_one("[data-file-icon-bg]")
-                or soup.select_one('td[data-column-field="6"]')
-                or soup.select_one("td:first-child")
-            )
-            if icon_container:
-                scoped_paths = [
-                    p.get("d", "") for p in icon_container.find_all("path") if p.get("d")
-                ]
-                scoped_g = [str(g) for g in icon_container.find_all("g")]
-                scoped_outers = [str(s) for s in icon_container.find_all("svg")]
-                scoped_inners = [str(s.decode_contents()) for s in icon_container.find_all("svg")]
-                candidates = scoped_g + scoped_outers + scoped_inners
-                return scoped_paths, candidates
-        except Exception:
-            pass
-
-    candidates = list(element.g_elements) + list(element.svg_outers) + list(element.svg_inners)
-    if element.raw_html and not candidates:
-        candidates.append(element.raw_html)
-    return element.paths, candidates
-
-
-def _matches_icon_structure(candidate_htmls: list[str], configured_element: str) -> bool:
-    """Match SVG/G structures against configured element string using normalized text and structural comparison."""
-    if not configured_element or not candidate_htmls:
-        return False
-
-    def _normalize_str(s: str) -> str:
-        return "".join(s.lower().split())
-
-    norm_expected = _normalize_str(configured_element)
-    for html in candidate_htmls:
-        if norm_expected in _normalize_str(html):
-            return True
-
-    # Structural comparison via ElementTree
-    try:
-        expected_root = ET.fromstring(configured_element)
-        expected_rects = [
-            {k.lower(): " ".join(v.lower().split()) for k, v in child.attrib.items()}
-            for child in expected_root
-            if child.tag.endswith("rect")
-        ]
-        if expected_rects:
-            for html in candidate_htmls:
-                try:
-                    wrapped = f"<root>{html}</root>"
-                    cand_root = ET.fromstring(wrapped)
-                    for g_node in cand_root.iter():
-                        if g_node.tag.endswith("g"):
-                            cand_rects = [
-                                {k.lower(): " ".join(v.lower().split()) for k, v in child.attrib.items()}
-                                for child in g_node
-                                if child.tag.endswith("rect")
-                            ]
-                            if cand_rects == expected_rects:
-                                return True
-                except Exception:
-                    continue
-    except Exception:
-        pass
-
-    # Fallback to BeautifulSoup matching
-    try:
-        soup_expected = BeautifulSoup(configured_element, "html.parser")
-        exp_rects = [
-            {
-                k.lower(): " ".join(v.lower().split()) if isinstance(v, str) else v
-                for k, v in r.attrs.items()
-            }
-            for r in soup_expected.find_all("rect")
-        ]
-        if exp_rects:
-            for html in candidate_htmls:
-                soup_cand = BeautifulSoup(html, "html.parser")
-                for g in soup_cand.find_all("g"):
-                    c_rects = [
-                        {
-                            k.lower(): " ".join(v.lower().split()) if isinstance(v, str) else v
-                            for k, v in r.attrs.items()
-                        }
-                        for r in g.find_all("rect")
-                    ]
-                    if c_rects == exp_rects:
-                        return True
-    except Exception:
-        pass
-
-    return False
-
-
-def _matches_icon_geometry(
-    candidate_htmls: list[str],
-    configured_element: str,
-    *,
-    required_path_count: int | None = None,
-    require_rects: bool = True,
-) -> bool:
-    """Match configured SVG icons using stable path geometry and rectangle attributes."""
-    if not configured_element or not candidate_htmls:
-        return False
-
-    try:
-        expected = BeautifulSoup(configured_element, "html.parser")
-        expected_paths = [
-            _normalize_path(path.get("d", ""))
-            for path in expected.find_all("path")
-            if path.get("d")
-        ]
-        expected_rects = [
-            {
-                key.lower(): " ".join(value.lower().split())
-                for key, value in rect.attrs.items()
-                if isinstance(value, str)
-            }
-            for rect in expected.find_all("rect")
-        ]
-        if not expected_paths and not expected_rects:
-            return False
-        required_paths = expected_paths
-        if required_path_count is not None:
-            required_paths = expected_paths[:required_path_count]
-
-        for html in candidate_htmls:
-            candidate = BeautifulSoup(html, "html.parser")
-            candidate_paths = {
-                _normalize_path(path.get("d", ""))
-                for path in candidate.find_all("path")
-                if path.get("d")
-            }
-            if not all(path in candidate_paths for path in required_paths):
-                continue
-
-            candidate_rects = [
-                {
-                    key.lower(): " ".join(value.lower().split())
-                    for key, value in rect.attrs.items()
-                    if isinstance(value, str)
-                }
-                for rect in candidate.find_all("rect")
-            ]
-            if not require_rects or all(rect in candidate_rects for rect in expected_rects):
-                return True
-    except Exception:
-        return False
-
-    return False
-
-
-def is_pdf(element: DriveElement) -> bool:
-    """PDF element contains exactly one <path> element whose d attribute matches config.pdf_icon_vector."""
-    expected = getattr(config, "pdf_icon_vector", "")
-    paths, _ = _get_icon_data(element)
-    matching = [d for d in paths if matches_vector(d, expected)]
-    return len(matching) == 1
-
-
-def is_folder(element: DriveElement) -> bool:
-    """Folder element contains an SVG <path> whose d attribute matches any configured folder icon vector.
-
-    Supports:
-    - config.folder_icon_vector (shared folder)
-    - config.folder_icon_vector2 (shared drive / member folder)
-    - config.folder_icon_vector3 (standard folder)
-    """
-    expected_vectors = [
-        getattr(config, "folder_icon_vector", ""),
-        getattr(config, "folder_icon_vector2", ""),
-        getattr(config, "folder_icon_vector3", ""),
-    ]
-    expected_vectors = [v for v in expected_vectors if v]
-    paths, _ = _get_icon_data(element)
-    return any(
-        matches_vector(d, expected)
-        for d in paths
-        for expected in expected_vectors
-    )
-
-
-def is_microsoft_word(element: DriveElement) -> bool:
-    """Microsoft Word element contains an SVG <path> whose d attribute matches config.microsoft_word_icon_vector."""
-    expected = getattr(config, "microsoft_word_icon_vector", "")
-    paths, _ = _get_icon_data(element)
-    return any(matches_vector(d, expected) for d in paths)
-
-
-def is_image(element: DriveElement) -> bool:
-    """Image element (PNG, JPG, JPEG, WEBP) contains an SVG <path> whose d attribute matches config.png_icon_vector."""
-    expected = getattr(config, "png_icon_vector", "")
-    paths, _ = _get_icon_data(element)
-    return any(matches_vector(d, expected) for d in paths)
-
-
-def is_google_doc(element: DriveElement) -> bool:
-    """Google Doc element recognized through pattern matching against config.google_doc_icon_element."""
-    configured = getattr(config, "google_doc_icon_element", "")
-    _, candidates = _get_icon_data(element)
-    return _matches_icon_structure(candidates, configured)
-
-
-def is_xlsx(element: DriveElement) -> bool:
-    """XLSX element recognized through pattern matching against config.xlsx_icon_element."""
-    configured = getattr(config, "xlsx_icon_element", "")
-    _, candidates = _get_icon_data(element)
-    return _matches_icon_structure(candidates, configured)
-
-
-def is_pptx(element: DriveElement) -> bool:
-    """PPTX element recognized through its visible SVG geometry."""
-    configured = getattr(config, "pptx_icon_element", "")
-    _, candidates = _get_icon_data(element)
-    # <use> definitions may be hoisted outside the icon subtree by the browser.
-    # The first two paths are the visible PPTX background and P glyph.
-    return _matches_icon_geometry(
-        candidates,
-        configured,
-        required_path_count=2,
-        require_rects=False,
-    )
-
-
-def is_zip_folder(element: DriveElement) -> bool:
-    """ZIP folder element recognized through stable SVG geometry from config.zip_folder_icon_element."""
-    configured = getattr(config, "zip_folder_icon_element", "")
-    _, candidates = _get_icon_data(element)
-    return _matches_icon_geometry(candidates, configured)
-
-
-def classify_element(element: DriveElement) -> str:
-    """Assign exactly one label to the element in deterministic order:
-
-    1. pdf
-    2. google_doc
-    3. microsoft_word
-    4. image
-    5. xlsx
-    6. folder
-    7. pptx
-    8. zip_folder
-    9. unknown
-    """
-    if is_pdf(element):
-        return "pdf"
-    if is_google_doc(element):
-        return "google_doc"
-    if is_microsoft_word(element):
-        return "microsoft_word"
-    if is_image(element):
-        return "image"
-    if is_xlsx(element):
-        return "xlsx"
-    if is_folder(element):
-        return "folder"
-    if is_pptx(element):
-        return "pptx"
-    if is_zip_folder(element):
-        return "zip_folder"
-    return "unknown"
-
-
-def generate_url(label: str, file_id: str) -> str | None:
-    """Generate target URL based on element label and file_id."""
-    if not file_id:
-        return None
-    if label in {"pdf", "google_doc", "microsoft_word", "image", "pptx", "zip_folder"}:
-        return f"https://drive.google.com/file/d/{file_id}/view"
-    if label == "xlsx":
-        return f"https://docs.google.com/spreadsheets/d/{file_id}/view"
-    if label == "folder":
-        return f"https://drive.google.com/drive/folders/{file_id}"
-    return None
 
 
 def log_unsupported_element(file_id: str, tabindex: str | None) -> None:
@@ -456,10 +137,14 @@ def validate_drive_folder_url(url: str) -> None:
 
     parsed = urlparse(url.strip())
     if parsed.scheme not in {"http", "https"}:
-        raise ValueError(f"Invalid URL scheme '{parsed.scheme}'. Must be http or https: {url}")
+        raise ValueError(
+            f"Invalid URL scheme '{parsed.scheme}'. Must be http or https: {url}"
+        )
 
     if "drive.google.com" not in parsed.netloc.lower():
-        raise ValueError(f"Invalid domain '{parsed.netloc}'. Must be drive.google.com: {url}")
+        raise ValueError(
+            f"Invalid domain '{parsed.netloc}'. Must be drive.google.com: {url}"
+        )
 
     segments = [s for s in parsed.path.split("/") if s]
     if "folders" not in segments:
@@ -537,7 +222,7 @@ class DriveFolderScraper:
         elements = get_file_elements(self.page)
 
         for element in elements:
-            label = classify_element(element)
+            label = classifiers.classify_element(element)
 
             if label == "unknown":
                 log_unsupported_element(element.data_id, element.tabindex)
@@ -548,7 +233,7 @@ class DriveFolderScraper:
                 if folder_id and folder_id not in self.visited_folder_ids:
                     self.visited_folder_ids.add(folder_id)
                     if current_depth + 1 <= max_depth:
-                        folder_url = generate_url("folder", folder_id)
+                        folder_url = classifiers.generate_url("folder", folder_id)
                         if folder_url:
                             self.queue.append((folder_url, current_depth + 1))
                 continue
@@ -556,7 +241,7 @@ class DriveFolderScraper:
             # File format (pdf, google_doc, microsoft_word, image, xlsx, pptx, zip_folder)
             file_id = element.data_id
             if file_id and file_id not in self.seen_file_ids:
-                url = generate_url(label, file_id)
+                url = classifiers.generate_url(label, file_id)
                 if url:
                     self.seen_file_ids.add(file_id)
                     self.discovered_file_urls.append(url)
@@ -591,7 +276,9 @@ class DriveFolderScraper:
                 )
                 attempt += 1
                 if attempt > max_retries:
-                    log_error(f"Retries exhausted for folder {folder_url}. Skipping folder.")
+                    log_error(
+                        f"Retries exhausted for folder {folder_url}. Skipping folder."
+                    )
                     return
             except Exception as e:
                 log_error(
@@ -599,7 +286,9 @@ class DriveFolderScraper:
                 )
                 attempt += 1
                 if attempt > max_retries:
-                    log_error(f"Retries exhausted for folder {folder_url}. Skipping folder.")
+                    log_error(
+                        f"Retries exhausted for folder {folder_url}. Skipping folder."
+                    )
                     return
 
     def scrape(self) -> list[str]:
@@ -634,6 +323,7 @@ def scrape(source: str | Page) -> list[str]:
     Returns:
         A list of discovered file URLs in first-discovery order.
     """
+
     if isinstance(source, str):
         validate_drive_folder_url(source)
         playwright, browser, page = init_browser()
@@ -649,10 +339,16 @@ def scrape(source: str | Page) -> list[str]:
         scraper = DriveFolderScraper(source)
         return scraper.scrape()
     else:
-        raise TypeError(f"Expected source to be str or Page, got {type(source).__name__}")
+        raise TypeError(
+            f"Expected source to be str or Page, got {type(source).__name__}"
+        )
+
 
 if __name__ == "__main__":
-    l = scrape("https://drive.google.com/drive/folders/1MBkJcFyPzuLeCOoMLMo-hGzrM4Yu_lTr")
+    with console.status("[bold white]Exploring folder[/bold white]", spinner="dots"):
+        l = scrape(
+            "https://drive.google.com/drive/folders/1g__ke0ZPOIrH7DcHocmLDqyltgsnkTjk"
+        )
     for e in l:
         print(e)
-    print(len(l))
+    print("Total: " + str(len(l)))
