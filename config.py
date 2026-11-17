@@ -1,10 +1,53 @@
+import os
+
+
+def _load_dotenv(env_path: str | None = None) -> None:
+    """Load variables from a .env file into os.environ without overriding existing env vars."""
+    if env_path is None:
+        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.isfile(env_path):
+        return
+    with open(env_path, encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:].strip()
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key, value = key.strip(), value.strip()
+            if not key:
+                continue
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                value = value[1:-1]
+            else:
+                comment_idx = value.find(" #")
+                if comment_idx != -1:
+                    value = value[:comment_idx].strip()
+            os.environ.setdefault(key, value)
+
+
+_load_dotenv()
+
 OUTPUT_DIR = "output"  # relative path
-FOLDER_MAX_DEPTH = 2
+FOLDER_MAX_DEPTH = 3
 API_CONCURRENCY = 20  # maximum number of viewer image requests per batch
 SCRAPE_TYPE = "d"  # "s": screenshot, "d": try to download directly
 MAX_CONCURENT_FOLDER_EXPLORER=5
 SCRAPE_TIMEOUT_SECONDS = 15
 SCRAPE_RETRY_COUNT = 2
+
+# Google Drive API (folder scraping). Values come from process environment
+# variables or the project's .env file.
+# The folder scraper uses the Drive API only when USE_GOOGLE_DRIVE_API is true
+# AND GOOGLE_API_KEY is non-empty; otherwise it falls back to Playwright.
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "").strip()
+USE_GOOGLE_DRIVE_API = os.environ.get("USE_GOOGLE_DRIVE_API", "false").strip().lower() in {"1", "true", "yes", "on"}
+# Client-side rate limit: at most N requests per sliding window of P seconds.
+GOOGLE_DRIVE_API_RATE_LIMIT = 12000
+GOOGLE_DRIVE_API_RATE_PERIOD_SECONDS = 60
 
 folder_icon_vector="""M20,6h-8l-2-2H4C2.9,4,2.01,4.9,2.01,6L2,18c0,1.1,0.9,2,2,2h16c1.1,0,2-0.9,2-2V8C22,6.9,21.1,6,20,6z M15,9 c1.1,0,2,0.9,2,2c0,1.1-0.9,2-2,2s-2-0.9-2-2C13,9.9,13.9,9,15,9z M19,17h-8v-0.57c0-0.81,0.48-1.53,1.22-1.85 C13.07,14.21,14.01,14,15,14c0.99,0,1.93,0.21,2.78,0.58C18.52,14.9,19,15.62,19,16.43V17z"""
 folder_icon_vector2="""M4 20C3.45 20 2.97917 19.8042 2.5875 19.4125C2.19583 19.0208 2 18.55 2 18V6C2 5.45 2.19583 4.97917 2.5875 4.5875C2.97917 4.19583 3.45 4 4 4H10L12 6H20C20.55 6 21.0208 6.19583 21.4125 6.5875C21.8042 6.97917 22 7.45 22 8V18C22 18.55 21.8042 19.0208 21.4125 19.4125C21.0208 19.8042 20.55 20 20 20H4ZM12 17C13.1 17 14.0417 16.6083 14.825 15.825C15.6083 15.0417 16 14.1 16 13C16 11.9 15.6083 10.9583 14.825 10.175C14.0417 9.39167 13.1 9 12 9C10.9 9 9.95833 9.39167 9.175 10.175C8.39167 10.9583 8 11.9 8 13C8 14.1 8.39167 15.0417 9.175 15.825C9.95833 16.6083 10.9 17 12 17ZM10.85 10.8C11.0333 10.7167 11.2167 10.6458 11.4 10.5875C11.5833 10.5292 11.7833 10.5 12 10.5C12.7 10.5 13.2917 10.7417 13.775 11.225C14.2583 11.7083 14.5 12.3 14.5 13C14.5 13.2167 14.4708 13.4167 14.4125 13.6C14.3542 13.7833 14.2833 13.9667 14.2 14.15L10.85 10.8ZM12 15.5C11.3 15.5 10.7083 15.2583 10.225 14.775C9.74167 14.2917 9.5 13.7 9.5 13C9.5 12.7833 9.52917 12.5833 9.5875 12.4C9.64583 12.2167 9.71667 12.0333 9.8 11.85L13.15 15.2C12.9667 15.2833 12.7833 15.3542 12.6 15.4125C12.4167 15.4708 12.2167 15.5 12 15.5Z"""

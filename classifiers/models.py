@@ -18,6 +18,7 @@ class DocumentType(Enum):
     XLSX = "xlsx"
     ZIP_FOLDER = "zip_folder"
     UNSUPPORTED_FORMAT = "unsupported_format"
+    SHORTCUT = "shortcut"
 
 
 class WebsiteType(Enum):
