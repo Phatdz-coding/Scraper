@@ -32,11 +32,12 @@ def _load_dotenv(env_path: str | None = None) -> None:
 _load_dotenv()
 
 OUTPUT_DIR = "output"  # relative path
-FOLDER_MAX_DEPTH = 3
+FOLDER_MAX_DEPTH = 10
 API_CONCURRENCY = 20  # maximum number of viewer image requests per batch
 SCRAPE_TYPE = "d"  # "s": screenshot, "d": try to download directly
 MAX_CONCURENT_FOLDER_EXPLORER=5
-SCRAPE_TIMEOUT_SECONDS = 15
+MAX_CONCURENT_FOLDER_NODE_VISIT=10 # determine the maximum number of folder to be visited and scraped in DriveFolderScraper.queue
+SCRAPE_TIMEOUT_SECONDS = 10
 SCRAPE_RETRY_COUNT = 2
 
 # Google Drive API (folder scraping). Values come from process environment
