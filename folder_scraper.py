@@ -366,17 +366,60 @@ def _navigate_folder(page: Page, url: str, timeout_ms: int, max_retries: int) ->
 
 
 class DriveFolderScraper:
-    """Scrapes Google Drive folders recursively using breadth-first search (BFS)."""
+    """Scrapes Google Drive folders recursively using breadth-first search (BFS).
+
+    Implements a thread-safe Singleton pattern so that a single instance is reused
+    across the application lifecycle.
+    """
+
+    _instance: DriveFolderScraper | None = None
+    _lock: threading.Lock = threading.Lock()
+
+    def __new__(cls, *args: Any, **kwargs: Any) -> DriveFolderScraper:
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._initialized = False
+            return cls._instance
+
+    @classmethod
+    def get_instance(cls, page: Page | None = None) -> DriveFolderScraper:
+        """Return the singleton instance of DriveFolderScraper."""
+        return cls(page)
+
+    @classmethod
+    def _reset_instance(cls) -> None:
+        """Reset the singleton instance (primarily for testing or cleanup)."""
+        with cls._lock:
+            cls._instance = None
 
     def __init__(self, page: Page | None = None):
         # `page` is only required for the Playwright-based scraping; the
         # API-based scraping (`_scrape_by_api`) creates the scraper without it.
-        self.page = page
+        if page is not None:
+            self.page = page
+        elif not hasattr(self, "page"):
+            self.page = None
+
+        if getattr(self, "_initialized", False):
+            return
+
+        self._initialized = True
         self.discovered_file_urls: list[str] = []
         self.discovered_file_links: list[ClassifiedLink] = []
         self.seen_file_ids: set[str] = set()
         self.visited_folder_ids: set[str] = set()
         self.queue: collections.deque[tuple[str, int]] = collections.deque()
+
+    def reset(self, page: Page | None = None) -> None:
+        """Reset internal discovery state and queue for a fresh scrape session."""
+        if page is not None:
+            self.page = page
+        self.discovered_file_urls.clear()
+        self.discovered_file_links.clear()
+        self.seen_file_ids.clear()
+        self.visited_folder_ids.clear()
+        self.queue.clear()
 
     def _record_api_items(
         self, items: list[dict[str, Any]], current_depth: int
@@ -503,6 +546,7 @@ class DriveFolderScraper:
 
     def scrape(self) -> list[str]:
         """Perform breadth-first traversal starting from current page state."""
+        self.reset()
         timeout_seconds = getattr(config, "SCRAPE_TIMEOUT_SECONDS", 15)
         timeout_ms = int(timeout_seconds * 1000)
 
@@ -696,6 +740,7 @@ def _scrape_by_api(folderID:str, api_key:str) -> DriveFolderScraper:
         api_key=masked_key,
     )
     scraper = DriveFolderScraper()
+    scraper.reset()
 
     session = requests.Session()
     session.mount("https://", HTTPAdapter(pool_connections=1, pool_maxsize=workers))
