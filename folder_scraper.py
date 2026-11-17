@@ -21,7 +21,7 @@ import typer
 
 import config
 import classifiers
-from classifiers import DocumentType, DriveElement
+from classifiers import ClassifiedLink, DocumentType, DriveElement
 
 console = Console()
 
@@ -212,6 +212,7 @@ class DriveFolderScraper:
     def __init__(self, page: Page):
         self.page = page
         self.discovered_file_urls: list[str] = []
+        self.discovered_file_links: list[ClassifiedLink] = []
         self.seen_file_ids: set[str] = set()
         self.visited_folder_ids: set[str] = set()
         self.queue: collections.deque[tuple[str, int]] = collections.deque()
@@ -243,10 +244,11 @@ class DriveFolderScraper:
             # File format (pdf, google_doc, microsoft_word, image, xlsx, pptx, zip_folder)
             file_id = element.data_id
             if file_id and file_id not in self.seen_file_ids:
-                url = classifiers.generate_url(label, file_id)
-                if url:
+                classified_link = classifiers.generate_classified_url(label, file_id)
+                if classified_link:
                     self.seen_file_ids.add(file_id)
-                    self.discovered_file_urls.append(url)
+                    self.discovered_file_links.append(classified_link)
+                    self.discovered_file_urls.append(classified_link.url)
 
     def _process_queued_folder(self, folder_url: str, depth: int) -> None:
         """Navigate to a child folder with retries and process its elements."""
@@ -313,6 +315,36 @@ class DriveFolderScraper:
 
         return self.discovered_file_urls
 
+    def scrape_classified(self) -> list[ClassifiedLink]:
+        """Perform breadth-first traversal and return discovered ClassifiedLink objects."""
+        self.scrape()
+        return self.discovered_file_links
+
+
+def _scrape_source(source: str | Page) -> DriveFolderScraper:
+    """Validate and scrape a Google Drive folder from a URL or Playwright Page."""
+    if isinstance(source, str):
+        validate_drive_folder_url(source)
+        playwright, browser, page = init_browser()
+        try:
+            timeout_seconds = getattr(config, "SCRAPE_TIMEOUT_SECONDS", 15)
+            timeout_ms = int(timeout_seconds * 1000)
+            max_retries = getattr(config, "SCRAPE_RETRY_COUNT", 2)
+            _navigate_folder(page, source, timeout_ms, max_retries)
+            scraper = DriveFolderScraper(page)
+            scraper.scrape()
+            return scraper
+        finally:
+            cleanup_browser(playwright, browser, page)
+    elif isinstance(source, Page):
+        scraper = DriveFolderScraper(source)
+        scraper.scrape()
+        return scraper
+    else:
+        raise TypeError(
+            f"Expected source to be str or Page, got {type(source).__name__}"
+        )
+
 
 def scrape(source: str | Page) -> list[str]:
     """Scrapes a Google Drive folder and returns discovered file URLs.
@@ -325,30 +357,26 @@ def scrape(source: str | Page) -> list[str]:
     Returns:
         A list of discovered file URLs in first-discovery order.
     """
+    return _scrape_source(source).discovered_file_urls
 
-    if isinstance(source, str):
-        validate_drive_folder_url(source)
-        playwright, browser, page = init_browser()
-        try:
-            timeout_seconds = getattr(config, "SCRAPE_TIMEOUT_SECONDS", 15)
-            timeout_ms = int(timeout_seconds * 1000)
-            max_retries = getattr(config, "SCRAPE_RETRY_COUNT", 2)
-            _navigate_folder(page, source, timeout_ms, max_retries)
-            return scrape(page)
-        finally:
-            cleanup_browser(playwright, browser, page)
-    elif isinstance(source, Page):
-        scraper = DriveFolderScraper(source)
-        return scraper.scrape()
-    else:
-        raise TypeError(
-            f"Expected source to be str or Page, got {type(source).__name__}"
-        )
+
+def scrape_classified(source: str | Page) -> list[ClassifiedLink]:
+    """Scrapes a Google Drive folder and returns discovered ClassifiedLink objects.
+
+    Supports both a Google Drive folder URL (str) and an existing Playwright Page.
+
+    Args:
+        source: A Google Drive folder URL string or a Playwright Page instance.
+
+    Returns:
+        A list of discovered ClassifiedLink instances in first-discovery order.
+    """
+    return _scrape_source(source).discovered_file_links
 
 
 if __name__ == "__main__":
     with console.status("[bold white]Exploring folder[/bold white]", spinner="dots"):
-        l = scrape(
+        l = scrape_classified(
             "https://drive.google.com/drive/folders/1g__ke0ZPOIrH7DcHocmLDqyltgsnkTjk"
         )
     for e in l:

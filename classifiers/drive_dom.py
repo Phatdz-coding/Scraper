@@ -1,50 +1,16 @@
-"""Google Drive element classification helpers."""
+"""Google Drive DOM/SVG element classification helpers."""
 
 from __future__ import annotations
 
+import logging
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
-from enum import Enum
 
 from bs4 import BeautifulSoup
 
 import config
+from classifiers.models import ClassifiedLink, DocumentType, DriveElement, WebsiteType
 
-
-class DocumentType(Enum):
-    """Supported Google Drive document and file types."""
-
-    FOLDER = "folder"
-    PDF = "pdf"
-    GOOGLE_DOC = "google_doc"
-    MICROSOFT_WORD = "microsoft_word"
-    PPTX = "pptx"
-    JPG = PNG = JPEG = IMAGE = "image"
-    XLSX = "xlsx"
-    ZIP_FOLDER = "zip_folder"
-    UNSUPPORTED_FORMAT = "unsupported_format"
-
-
-class WebsiteType(Enum):
-    """Supported source websites."""
-
-    GOOGLE_DRIVE = 1
-    GOOGLE_DOC = 2
-    SCRIBD = 3
-
-
-@dataclass
-class DriveElement:
-    """Represents an extracted Google Drive item element from the DOM."""
-
-    data_id: str
-    tabindex: str | None = None
-    paths: list[str] = field(default_factory=list)
-    g_elements: list[str] = field(default_factory=list)
-    svg_inners: list[str] = field(default_factory=list)
-    svg_outers: list[str] = field(default_factory=list)
-    raw_html: str = ""
-
+logger = logging.getLogger(__name__)
 
 def _normalize_path(path_str: str) -> str:
     """Normalize SVG path data."""
@@ -316,19 +282,37 @@ def classify_element(element: DriveElement) -> DocumentType:
 
 def generate_url(label: DocumentType, file_id: str) -> str | None:
     """Generate the target URL for a classified element."""
-    if not file_id:
+    try:
+        if not file_id:
+            return None
+        if label in {
+            DocumentType.PDF,
+            DocumentType.GOOGLE_DOC,
+            DocumentType.MICROSOFT_WORD,
+            DocumentType.IMAGE,
+            DocumentType.PPTX,
+            DocumentType.ZIP_FOLDER,
+        }:
+            return f"https://drive.google.com/file/d/{file_id}/view"
+        if label == DocumentType.XLSX:
+            return f"https://docs.google.com/spreadsheets/d/{file_id}/view"
+        if label == DocumentType.FOLDER:
+            return f"https://drive.google.com/drive/folders/{file_id}"
+    except (AttributeError, TypeError, ValueError) as exc:
+        logger.warning("Unable to generate URL for file %r: %s", file_id, exc)
         return None
-    if label in {
-        DocumentType.PDF,
-        DocumentType.GOOGLE_DOC,
-        DocumentType.MICROSOFT_WORD,
-        DocumentType.IMAGE,
-        DocumentType.PPTX,
-        DocumentType.ZIP_FOLDER,
-    }:
-        return f"https://drive.google.com/file/d/{file_id}/view"
-    if label == DocumentType.XLSX:
-        return f"https://docs.google.com/spreadsheets/d/{file_id}/view"
-    if label == DocumentType.FOLDER:
-        return f"https://drive.google.com/drive/folders/{file_id}"
     return None
+
+
+def generate_classified_url(
+    label: DocumentType, file_id: str
+) -> ClassifiedLink | None:
+    """Generate a ClassifiedLink for a classified Google Drive element."""
+    url = generate_url(label, file_id)
+    if url is None:
+        return None
+    return ClassifiedLink(
+        url=url,
+        website_type=WebsiteType.GOOGLE_DRIVE,
+        document_type=label,
+    )

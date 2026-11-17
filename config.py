@@ -2,7 +2,7 @@ OUTPUT_DIR = "output"  # relative path
 FOLDER_MAX_DEPTH = 2
 API_CONCURRENCY = 20  # maximum number of viewer image requests per batch
 SCRAPE_TYPE = "d"  # "s": screenshot, "d": try to download directly
-
+MAX_CONCURENT_FOLDER_EXPLORER=5
 SCRAPE_TIMEOUT_SECONDS = 15
 SCRAPE_RETRY_COUNT = 2
 
