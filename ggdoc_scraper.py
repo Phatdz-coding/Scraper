@@ -238,7 +238,7 @@ async def scrape_inpage_by_api(
                 f"Could not capture viewer parameters from the page: {', '.join(missing)}"
             )
 
-        first_page = int(viewer_params.get("page", "0"))
+        first_page = 0
         try:
             width = max(
                 int(viewer_params.get("w", "1600")),
