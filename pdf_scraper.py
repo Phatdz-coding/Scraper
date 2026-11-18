@@ -23,6 +23,7 @@ from tracker import (
     get_active_progress,
     release_output_path,
     reserve_output_path,
+    resolve_download_filename,
     scrape_progress,
 )
 
@@ -288,13 +289,29 @@ def _direct_download_sync(request: Request, output_path: Path) -> tuple[Path | N
     return output_path, response_status
 
 
+def _fetch_sync(request: Request) -> tuple[bytes | None, int, object]:
+    with urlopen(request) as response:
+        content_type = (
+            response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        )
+        if content_type == "text/html":
+            return None, 404, response.headers
+        return response.read(), response.status, response.headers
+
+
 async def direct_download(
     file_id: str,
     document_name: str,
     *,
     output_dir: Path | str | None = None,
+    prefer_header_name: bool = False,
 ) -> tuple[Path | None, int]:
-    """Download a Google Drive file directly and return its path and status without blocking the event loop."""
+    """Download a Google Drive file directly and return its path and status without blocking the event loop.
+
+    When ``prefer_header_name`` is set, the filename comes from the HTTP
+    ``Content-Disposition`` header (or the extension is inferred from
+    ``Content-Type``) instead of ``document_name``.
+    """
     if not file_id or not file_id.strip():
         raise ValueError("fileID must be a non-empty string")
     endpoint = "https://drive.usercontent.google.com/download"
@@ -304,6 +321,24 @@ async def direct_download(
     )
 
     destination = _resolve_output_dir(output_dir)
+
+    if prefer_header_name:
+        body, status, headers = await asyncio.to_thread(_fetch_sync, request)
+        if body is None:
+            return None, status
+        name = resolve_download_filename(
+            headers, document_name, prefer_header_name=True
+        )
+        output_path = await reserve_output_path(
+            destination, name, file_id=file_id.strip()
+        )
+        try:
+            await asyncio.to_thread(output_path.write_bytes, body)
+        except Exception:
+            release_output_path(output_path)
+            raise
+        return output_path, status
+
     output_path = await reserve_output_path(
         destination, document_name, file_id=file_id.strip()
     )

@@ -627,6 +627,206 @@ class TestPhase3ConcurrentScraping(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
+# Lazy Browser Page / -t d vs -t s Routing Tests
+# ---------------------------------------------------------------------------
+class _FakeHTTPResponse:
+    def __init__(self, status: int, headers: dict[str, str], body: bytes) -> None:
+        self.status = status
+        self.headers = headers
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self) -> _FakeHTTPResponse:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        pass
+
+
+class TestLazyPageRouting(unittest.IsolatedAsyncioTestCase):
+    URL = "https://drive.google.com/file/d/LAZY_1/view"
+
+    @staticmethod
+    def _opened_pages(browser: FakeAsyncBrowser) -> list[FakeAsyncPage]:
+        return [p for ctx in browser.contexts for p in ctx.pages]
+
+    def _factory(self, calls: list[str], doc_type: DocumentType = DocumentType.PDF):
+        async def factory(page: object, url: str) -> MagicMock:
+            calls.append(url)
+            tmpl = MagicMock(spec=Template)
+            tmpl.document_type = doc_type
+            tmpl.fileID = "LAZY_1"
+            return tmpl
+
+        return factory
+
+    async def test_t_d_direct_download_success_opens_no_browser_page(self) -> None:
+        browser = FakeAsyncBrowser()
+        factory_calls: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = BatchConfig(output_dir=Path(tmp_dir), concurrency=1, scrape_type="d")
+            scraper = PlaywrightAsyncLinkScraper(
+                template_factory=self._factory(factory_calls)
+            )
+            link = ClassifiedLink(url=self.URL, website_type=WebsiteType.GOOGLE_DRIVE)
+            response = _FakeHTTPResponse(
+                200,
+                {
+                    "Content-Type": "application/pdf",
+                    "Content-Disposition": 'attachment; filename="Lecture 1.pdf"',
+                },
+                b"%PDF-1.4",
+            )
+            with patch("pdf_scraper.urlopen", return_value=response):
+                res = await scraper.scrape_one(link, browser, cfg)  # type: ignore[arg-type]
+
+            self.assertTrue(res.succeeded, res.error)
+            self.assertEqual(res.output_path, Path(tmp_dir) / "Lecture 1.pdf")
+            self.assertEqual(res.output_path.read_bytes(), b"%PDF-1.4")
+        self.assertEqual(browser.contexts, [])
+        self.assertEqual(factory_calls, [])
+
+    async def test_t_d_direct_download_infers_extension_from_content_type(self) -> None:
+        browser = FakeAsyncBrowser()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = BatchConfig(output_dir=Path(tmp_dir), concurrency=1, scrape_type="d")
+            scraper = PlaywrightAsyncLinkScraper()
+            link = ClassifiedLink(url=self.URL, website_type=WebsiteType.GOOGLE_DRIVE)
+            response = _FakeHTTPResponse(200, {"Content-Type": "application/pdf"}, b"x")
+            with patch("pdf_scraper.urlopen", return_value=response):
+                res = await scraper.scrape_one(link, browser, cfg)  # type: ignore[arg-type]
+            self.assertTrue(res.succeeded, res.error)
+            self.assertEqual(res.output_path.name, "LAZY_1.pdf")
+        self.assertEqual(browser.contexts, [])
+
+    async def test_t_d_fallback_opens_page_once_and_skips_type_detection_when_resolved(
+        self,
+    ) -> None:
+        cases = {
+            DocumentType.PDF: "pdf_scraper.scrape_inpage_by_api",
+            DocumentType.IMAGE: "image_scraper.scrape_inpage_by_api",
+            DocumentType.GOOGLE_DOC: "ggdoc_scraper.scrape_inpage_by_api",
+        }
+        import image_scraper
+
+        for doc_type, target in cases.items():
+            with self.subTest(document_type=doc_type):
+                browser = FakeAsyncBrowser()
+                factory_calls: list[str] = []
+                module_name, fn_name = target.split(".")
+                module = {
+                    "pdf_scraper": pdf_scraper,
+                    "image_scraper": image_scraper,
+                    "ggdoc_scraper": ggdoc_scraper,
+                }[module_name]
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    cfg = BatchConfig(
+                        output_dir=Path(tmp_dir), concurrency=1, scrape_type="d"
+                    )
+                    scraper = PlaywrightAsyncLinkScraper(
+                        template_factory=self._factory(factory_calls)
+                    )
+                    link = ClassifiedLink(
+                        url=self.URL,
+                        website_type=WebsiteType.GOOGLE_DRIVE,
+                        document_type=doc_type,
+                    )
+                    html_resp = _FakeHTTPResponse(200, {"Content-Type": "text/html"}, b"<html>")
+                    inpage = AsyncMock(return_value=Path(tmp_dir) / "out.bin")
+                    with (
+                        patch("pdf_scraper.urlopen", return_value=html_resp),
+                        patch(
+                            "ggdoc_scraper.urlopen",
+                            side_effect=__import__("urllib.error").error.HTTPError(
+                                self.URL, 404, "nf", {}, None  # type: ignore[arg-type]
+                            ),
+                        ),
+                        patch.object(module, fn_name, new=inpage),
+                    ):
+                        res = await scraper.scrape_one(link, browser, cfg)  # type: ignore[arg-type]
+                self.assertTrue(res.succeeded, res.error)
+                inpage.assert_awaited_once()
+                self.assertEqual(factory_calls, [])
+                pages = self._opened_pages(browser)
+                self.assertEqual(len(browser.contexts), 1)
+                self.assertEqual(len(pages), 1)
+                self.assertEqual(len(pages[0].goto_calls), 1)
+                self.assertTrue(pages[0].closed)
+
+    async def test_t_d_fallback_runs_type_detection_when_missing_or_unknown(self) -> None:
+        for doc_type in (None, DocumentType.UNKNOWN):
+            with self.subTest(document_type=doc_type):
+                browser = FakeAsyncBrowser()
+                factory_calls: list[str] = []
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    cfg = BatchConfig(
+                        output_dir=Path(tmp_dir), concurrency=1, scrape_type="d"
+                    )
+                    scraper = PlaywrightAsyncLinkScraper(
+                        template_factory=self._factory(factory_calls)
+                    )
+                    link = ClassifiedLink(
+                        url=self.URL,
+                        website_type=WebsiteType.GOOGLE_DRIVE,
+                        document_type=doc_type,
+                    )
+                    html_resp = _FakeHTTPResponse(200, {"Content-Type": "text/html"}, b"<html>")
+                    inpage = AsyncMock(return_value=Path(tmp_dir) / "out.pdf")
+                    with (
+                        patch("pdf_scraper.urlopen", return_value=html_resp),
+                        patch.object(pdf_scraper, "scrape_inpage_by_api", new=inpage),
+                    ):
+                        res = await scraper.scrape_one(link, browser, cfg)  # type: ignore[arg-type]
+                self.assertTrue(res.succeeded, res.error)
+                self.assertEqual(factory_calls, [self.URL])
+                inpage.assert_awaited_once()
+                self.assertEqual(link.document_type, DocumentType.PDF)
+                pages = self._opened_pages(browser)
+                self.assertEqual(len(pages), 1)
+                self.assertEqual(len(pages[0].goto_calls), 1)
+
+    async def test_t_s_never_direct_downloads_and_opens_page_once(self) -> None:
+        for doc_type, expect_factory in ((DocumentType.PDF, False), (None, True)):
+            with self.subTest(document_type=doc_type):
+                browser = FakeAsyncBrowser()
+                factory_calls: list[str] = []
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    cfg = BatchConfig(
+                        output_dir=Path(tmp_dir), concurrency=1, scrape_type="s"
+                    )
+                    scraper = PlaywrightAsyncLinkScraper(
+                        template_factory=self._factory(factory_calls)
+                    )
+                    link = ClassifiedLink(
+                        url=self.URL,
+                        website_type=WebsiteType.GOOGLE_DRIVE,
+                        document_type=doc_type,
+                    )
+                    direct = AsyncMock(return_value=(Path(tmp_dir) / "d.pdf", 200))
+                    inpage = AsyncMock(return_value=Path(tmp_dir) / "s.pdf")
+                    with (
+                        patch.object(pdf_scraper, "direct_download", new=direct),
+                        patch.object(pdf_scraper, "scrape_inpage_by_api", new=inpage),
+                    ):
+                        res = await scraper.scrape_one(link, browser, cfg)  # type: ignore[arg-type]
+                self.assertTrue(res.succeeded, res.error)
+                direct.assert_not_awaited()
+                inpage.assert_awaited_once()
+                self.assertEqual(bool(factory_calls), expect_factory)
+                pages = self._opened_pages(browser)
+                self.assertEqual(len(pages), 1)
+                self.assertEqual(len(pages[0].goto_calls), 1)
+
+    async def test_template_supports_page_none(self) -> None:
+        tmpl = Template(None, self.URL, website_type=WebsiteType.GOOGLE_DRIVE)
+        self.assertEqual(tmpl.fileID, "LAZY_1")
+        self.assertEqual(await tmpl.get_file_name(), "LAZY_1")
+        self.assertEqual(await Template(None).get_file_name(), "document")
+
+
+# ---------------------------------------------------------------------------
 # Async Pipeline & Module Migration Unit Tests
 # ---------------------------------------------------------------------------
 class TestAsyncScraperModules(unittest.IsolatedAsyncioTestCase):

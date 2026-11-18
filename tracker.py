@@ -299,6 +299,46 @@ def get_active_filename_resolver() -> OutputFilenameResolver:
     return _default_filename_resolver
 
 
+def resolve_download_filename(
+    headers: object,
+    fallback_name: str,
+    *,
+    prefer_header_name: bool = False,
+    default_extension: str | None = None,
+) -> str:
+    """Pick a download filename from Content-Disposition, else fallback + inferred extension."""
+    import mimetypes
+    import re
+    from urllib.parse import unquote
+
+    def _get(key: str) -> str:
+        getter = getattr(headers, "get", None)
+        value = getter(key, "") if getter else ""
+        return value or ""
+
+    name: str | None = None
+    if prefer_header_name:
+        disposition = _get("Content-Disposition")
+        match = re.search(r"filename\*\s*=\s*[^']*'[^']*'([^;]+)", disposition, re.I)
+        if match:
+            name = unquote(match.group(1).strip().strip('"'))
+        else:
+            match = re.search(r'filename\s*=\s*"?([^";]+)"?', disposition, re.I)
+            if match:
+                name = match.group(1).strip()
+        if name:
+            name = Path(name.replace("\\", "/")).name or None
+
+    chosen = name or fallback_name
+    if not Path(chosen).suffix and prefer_header_name:
+        content_type = _get("Content-Type").split(";", 1)[0].strip().lower()
+        ext = default_extension or mimetypes.guess_extension(content_type) or ""
+        if ext == ".jpe":
+            ext = ".jpg"
+        chosen += ext
+    return chosen
+
+
 async def reserve_output_path(
     output_dir: Path,
     filename: str,

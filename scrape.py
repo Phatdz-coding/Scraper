@@ -337,25 +337,47 @@ class PlaywrightAsyncLinkScraper:
         try:
             config.output_dir.mkdir(parents=True, exist_ok=True)
             browser_cfg = getattr(config, "browser", None) or BrowserConfig.from_config()
-            context, page = await self._open_isolated_page(
-                browser, accept_downloads=browser_cfg.accept_downloads
-            )
             target_url = self._resolve_navigation_url(link)
-            await page.goto(target_url, wait_until=browser_cfg.wait_until)
 
-            if self._has_resolved_document_type(link):
-                template_info = Template(
-                    page,
-                    target_url,
-                    document_type=link.document_type,
+            async def page_factory() -> AsyncPage:
+                """Lazily open the isolated context/page and navigate once."""
+                nonlocal context, page
+                if page is not None:
+                    return page
+                context, page = await self._open_isolated_page(
+                    browser, accept_downloads=browser_cfg.accept_downloads
                 )
-                if template_info.website_type is None:
-                    template_info.website_type = link.website_type
+                await page.goto(target_url, wait_until=browser_cfg.wait_until)
+                return page
+
+            injected_scrape_fn = self._scrape_fn is not None
+            if injected_scrape_fn:
+                # Custom/mocked scrape_fn expects a ready page and template (legacy contract).
+                ready_page = await page_factory()
+                if self._has_resolved_document_type(link):
+                    template_info = Template(
+                        ready_page,
+                        target_url,
+                        document_type=link.document_type,
+                    )
+                    if template_info.website_type is None:
+                        template_info.website_type = link.website_type
+                else:
+                    active_template_factory = self._template_factory or Template.create
+                    template_info = await active_template_factory(
+                        ready_page, target_url
+                    )
+                    if getattr(template_info, "document_type", None) is not None:
+                        link.set_document_type(template_info.document_type)
             else:
-                active_template_factory = self._template_factory or Template.create
-                template_info = await active_template_factory(page, target_url)
-                if getattr(template_info, "document_type", None) is not None:
-                    link.set_document_type(template_info.document_type)
+                # Lightweight template: no browser page, no DOM inspection upfront.
+                template_info = Template(
+                    None,
+                    target_url,
+                    website_type=link.website_type,
+                    document_type=link.document_type,
+                    file_id=getattr(link, "file_id", None),
+                )
 
             active_scrape_fn = self._scrape_fn or start_scraping
             with task_execution_context(
@@ -364,12 +386,21 @@ class PlaywrightAsyncLinkScraper:
                 filename_resolver=self._filename_resolver,
                 enable_live=False,
             ) as task_ctx:
-                if self._scribd_scraper is not None:
-                    raw_res = active_scrape_fn(
-                        page, template_info, self._scribd_scraper
-                    )
+                if injected_scrape_fn:
+                    if self._scribd_scraper is not None:
+                        raw_res = active_scrape_fn(
+                            page, template_info, self._scribd_scraper
+                        )
+                    else:
+                        raw_res = active_scrape_fn(page, template_info)
                 else:
-                    raw_res = active_scrape_fn(page, template_info)
+                    raw_res = active_scrape_fn(
+                        None,
+                        template_info,
+                        self._scribd_scraper,
+                        page_factory=page_factory,
+                        template_factory=self._template_factory,
+                    )
 
                 output_path = (
                     await raw_res if inspect.isawaitable(raw_res) else raw_res
@@ -389,6 +420,10 @@ class PlaywrightAsyncLinkScraper:
                         output_path.name,
                         file_id=getattr(template_info, "fileID", None),
                     )
+
+            resolved_type = getattr(template_info, "document_type", None)
+            if resolved_type is not None and resolved_type != link.document_type:
+                link.set_document_type(resolved_type)
 
             return ScrapeItemResult(link=link, output_path=output_path, error=None)
         except Exception as exc:

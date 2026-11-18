@@ -29,13 +29,22 @@ def _log_console(message: str) -> None:
         Console().print(message)
 
 
+def _is_document_type_resolved(document_type: DocumentType | None) -> bool:
+    return document_type is not None and document_type not in {
+        DocumentType.SHORTCUT,
+        DocumentType.UNKNOWN,
+    }
+
+
 async def start_scraping(
-    page: Page,
+    page: Page | None,
     template_info: Template,
     scribd_scraper: Callable[[Page, str], Path | Awaitable[Path]] | None = None,
     *,
     output_dir: Path | None = None,
     scrape_type: str | None = None,
+    page_factory: Callable[[], Awaitable[Page]] | None = None,
+    template_factory: Callable[..., Awaitable[Template]] | None = None,
 ) -> Path:
     """
     base on the template's info and the config.py
@@ -64,7 +73,10 @@ async def start_scraping(
     because i don't have the unique scraper for this type of website
 
     If config.SCRAPE_TYPE is "s", skip direct downloads and use the viewer
-    scraper. Otherwise, try direct download before falling back to the viewer.
+    scraper. Otherwise ("d"), try HTTP direct download first without any browser
+    page; only when it fails (4xx / view-only) is the page lazily opened (via
+    ``page`` or ``page_factory``) and, only if the document type is missing or
+    unresolved, the DocumentType is detected from the DOM before routing.
     """
     if (
         template_info.fileID is None
@@ -78,15 +90,29 @@ async def start_scraping(
     ).lower()
 
     file_id = template_info.fileID
-    page_html = await page.content()
-    document_name = await template_info.get_file_name(page_html)
+    direct_attempted = False
+
+    async def _ensure_page() -> Page:
+        nonlocal page
+        if page is None:
+            if page_factory is None:
+                raise RuntimeError("A page or page_factory is required for scraping")
+            page = await page_factory()
+        template_info.page = page
+        return page
+
+    async def _resolve_document_name() -> str:
+        active_page = await _ensure_page()
+        return await template_info.get_file_name(await active_page.content())
 
     if template_info.website_type == WebsiteType.SCRIBD:
+        active_page = await _ensure_page()
+        document_name = await _resolve_document_name()
         if scribd_scraper is None:
             raise NotImplementedError(
                 "Scribd scraping is not implemented; provide scribd_scraper"
             )
-        result = scribd_scraper(page, document_name)
+        result = scribd_scraper(active_page, document_name)
         if inspect.isawaitable(result):
             return await result
         return result
@@ -99,22 +125,25 @@ async def start_scraping(
             ..., tuple[Path | None, int] | Awaitable[tuple[Path | None, int]]
         ],
         name: str,
+        *,
+        prefer_header_name: bool = False,
     ) -> Path | None:
-        if active_scrape_type == "s":
+        nonlocal direct_attempted
+        if active_scrape_type == "s" or direct_attempted:
             return None
+        direct_attempted = True
 
         async def _invoke_downloader() -> tuple[Path | None, int]:
-            if active_output_dir is not None:
-                try:
-                    sig = inspect.signature(downloader)
-                    if "output_dir" in sig.parameters:
-                        res = downloader(file_id, name, output_dir=active_output_dir)
-                    else:
-                        res = downloader(file_id, name)
-                except (ValueError, TypeError):
-                    res = downloader(file_id, name)
-            else:
-                res = downloader(file_id, name)
+            kwargs: dict[str, object] = {}
+            try:
+                params = inspect.signature(downloader).parameters
+                if active_output_dir is not None and "output_dir" in params:
+                    kwargs["output_dir"] = active_output_dir
+                if prefer_header_name and "prefer_header_name" in params:
+                    kwargs["prefer_header_name"] = True
+            except (ValueError, TypeError):
+                pass
+            res = downloader(file_id, name, **kwargs)
 
             if inspect.isawaitable(res):
                 return await res
@@ -163,6 +192,58 @@ async def start_scraping(
         if inspect.isawaitable(res):
             return await res
         return res
+
+    # ---- Phase 1 (-t d): HTTP direct download first, no browser needed ----
+    if active_scrape_type != "s":
+        known_name: str | None = None
+        if page is not None:
+            known_name = await template_info.get_file_name(await page.content())
+        doc_type = template_info.document_type
+        use_ggdoc = False
+        direct_candidate = False
+        if template_info.website_type == WebsiteType.GOOGLE_DRIVE:
+            direct_candidate = True
+            use_ggdoc = doc_type in (
+                DocumentType.GOOGLE_DOC,
+                DocumentType.MICROSOFT_WORD,
+            )
+        elif template_info.website_type == WebsiteType.GOOGLE_DOC:
+            direct_candidate = doc_type not in (DocumentType.XLSX, DocumentType.PPTX)
+            use_ggdoc = True
+        if direct_candidate:
+            if use_ggdoc:
+                base = known_name or file_id
+                direct_name = base if base.lower().endswith(".docx") else f"{base}.docx"
+                direct_path = await try_direct_download(
+                    ggdoc_scraper.direct_download,
+                    direct_name,
+                    prefer_header_name=known_name is None,
+                )
+            else:
+                direct_path = await try_direct_download(
+                    pdf_scraper.direct_download,
+                    known_name or file_id,
+                    prefer_header_name=known_name is None,
+                )
+            if direct_path is not None:
+                return direct_path
+
+    # ---- Phase 2: lazily open the page and resolve the DocumentType if needed ----
+    page = await _ensure_page()
+    if not _is_document_type_resolved(template_info.document_type):
+        if template_factory is not None:
+            resolved = await template_factory(page, template_info.url)
+        else:
+            resolved = await Template.create(
+                page,
+                template_info.url,
+                website_type=template_info.website_type,
+            )
+        template_info.document_type = resolved.document_type
+        if template_info.fileID is None:
+            template_info.fileID = resolved.fileID
+        template_info.page = page
+    document_name = await _resolve_document_name()
 
     if template_info.website_type == WebsiteType.GOOGLE_DRIVE:
         if template_info.document_type in (DocumentType.PDF, DocumentType.PPTX):

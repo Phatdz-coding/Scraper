@@ -34,7 +34,7 @@ class _TitleParser(HTMLParser):
 class Template:
     def __init__(
         self,
-        page: Page,
+        page: Page | None,
         url: str | None = None,
         *,
         website_type: WebsiteType | None = None,
@@ -349,6 +349,9 @@ class Template:
         Scribd – takes the first pipe-delimited segment of the title (the
         document name) and appends ``.pdf``.
         """
+        if html_template is None and self.page is None:
+            return self.fileID or "document"
+
         if html_template is not None:
             parser = _TitleParser()
             parser.feed(html_template)
