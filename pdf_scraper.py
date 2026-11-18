@@ -9,6 +9,7 @@ from urllib.request import Request, urlopen
 
 from playwright.async_api import Browser, ConsoleMessage, Page, async_playwright
 
+from classifiers import DocumentType
 import config
 from process_images import (
     convert_image_to_jpeg,
@@ -124,7 +125,7 @@ async def scrape_in_browser_by_script(
         raise ValueError("Browser context must have an open page")
 
     page = context.pages[-1]
-    template = await Template.create(page)
+    template = await Template.create(page, document_type=DocumentType.PDF)
     total_pages = await template.get_total_pages()
     output_path = await reserve_output_path(
         destination, document_name, file_id=template.fileID
@@ -147,7 +148,7 @@ async def scrape_in_page_by_script(
     """Save the PDF from the provided page and return its path."""
     destination = _resolve_output_dir(output_dir)
 
-    template = await Template.create(page)
+    template = await Template.create(page, document_type=DocumentType.PDF)
     total_pages = await template.get_total_pages()
     output_path = await reserve_output_path(
         destination, document_name, file_id=template.fileID
@@ -172,7 +173,7 @@ async def scrape_inpage_by_api(
     active_progress = _resolve_progress(progress)
     active_progress.reset()
 
-    template = await Template.create(page)
+    template = await Template.create(page, document_type=DocumentType.PDF)
     total_pages = await template.get_total_pages()
     output_path = await reserve_output_path(
         destination, document_name, file_id=template.fileID

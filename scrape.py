@@ -42,6 +42,7 @@ from classifiers import (
     WebsiteType,
 )
 import config
+from config import BatchConfig, BrowserConfig
 import folder_scraper
 import ggdoc_scraper
 from simple_scrape import start_scraping
@@ -60,57 +61,6 @@ console = Console()
 # ---------------------------------------------------------------------------
 # Data Models (DTOs)
 # ---------------------------------------------------------------------------
-@dataclass(frozen=True)
-class BatchConfig:
-    """Immutable configuration for a batch scraping run."""
-
-    output_dir: Path = field(default_factory=lambda: Path(config.OUTPUT_DIR))
-    concurrency: int = field(
-        default_factory=lambda: int(getattr(config, "CONCURRENT_SCRAPER", 5))
-    )
-    scrape_type: str = field(
-        default_factory=lambda: str(getattr(config, "SCRAPE_TYPE", "d"))
-    )
-    headless: bool = True
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.output_dir, Path):
-            object.__setattr__(self, "output_dir", Path(self.output_dir))
-        if int(self.concurrency) < 1:
-            raise ValueError("concurrency must be at least 1")
-        object.__setattr__(self, "concurrency", int(self.concurrency))
-
-        normalized_type = str(self.scrape_type).strip().lower()
-        if normalized_type not in {"d", "s"}:
-            raise ValueError(
-                f"Invalid scrape_type {self.scrape_type!r}. Must be 'd' or 's'."
-            )
-        object.__setattr__(self, "scrape_type", normalized_type)
-
-    @classmethod
-    def from_config(
-        cls,
-        *,
-        output_dir: Path | str | None = None,
-        concurrency: int | None = None,
-        scrape_type: str | None = None,
-        headless: bool = True,
-    ) -> BatchConfig:
-        """Construct a BatchConfig with optional overrides on top of config.py defaults."""
-        return cls(
-            output_dir=Path(output_dir)
-            if output_dir is not None
-            else Path(config.OUTPUT_DIR),
-            concurrency=concurrency
-            if concurrency is not None
-            else int(getattr(config, "CONCURRENT_SCRAPER", 5)),
-            scrape_type=scrape_type
-            if scrape_type is not None
-            else str(getattr(config, "SCRAPE_TYPE", "d")),
-            headless=headless,
-        )
-
-
 @dataclass(frozen=True)
 class ScrapeItemResult:
     """Outcome of scraping a single ClassifiedLink."""
@@ -342,12 +292,19 @@ class PlaywrightAsyncLinkScraper:
 
     @staticmethod
     async def _open_isolated_page(
-        browser: AsyncBrowser,
+        browser: AsyncBrowser | AsyncBrowserContext,
+        *,
+        accept_downloads: bool | None = None,
     ) -> tuple[AsyncBrowserContext | None, AsyncPage]:
-        """Open an isolated BrowserContext (accept_downloads=True) and Page on the shared Browser."""
+        """Open a Page on a shared persistent BrowserContext or an isolated BrowserContext on a Browser."""
+        allow_downloads = (
+            config.BROWSER_ACCEPT_DOWNLOADS
+            if accept_downloads is None
+            else accept_downloads
+        )
         new_context = getattr(browser, "new_context", None)
         if new_context is not None:
-            context = await new_context(accept_downloads=True)
+            context = await new_context(accept_downloads=allow_downloads)
             try:
                 page = await context.new_page()
                 return context, page
@@ -355,8 +312,19 @@ class PlaywrightAsyncLinkScraper:
                 await _close_resource_quietly(context)
                 raise
 
-        page = await browser.new_page(accept_downloads=True)
+        try:
+            page = await browser.new_page()
+        except TypeError:
+            page = await browser.new_page(accept_downloads=allow_downloads)  # type: ignore[call-arg]
         return None, page
+
+    @staticmethod
+    def _has_resolved_document_type(link: ClassifiedLink) -> bool:
+        """Return True when link.document_type is already resolved (not None, SHORTCUT, or UNKNOWN)."""
+        return link.document_type is not None and link.document_type not in {
+            DocumentType.SHORTCUT,
+            DocumentType.UNKNOWN,
+        }
 
     async def scrape_one(
         self,
@@ -368,14 +336,26 @@ class PlaywrightAsyncLinkScraper:
         page: AsyncPage | None = None
         try:
             config.output_dir.mkdir(parents=True, exist_ok=True)
-            context, page = await self._open_isolated_page(browser)
+            browser_cfg = getattr(config, "browser", None) or BrowserConfig.from_config()
+            context, page = await self._open_isolated_page(
+                browser, accept_downloads=browser_cfg.accept_downloads
+            )
             target_url = self._resolve_navigation_url(link)
-            await page.goto(target_url, wait_until="domcontentloaded")
+            await page.goto(target_url, wait_until=browser_cfg.wait_until)
 
-            active_template_factory = self._template_factory or Template.create
-            template_info = await active_template_factory(page, target_url)
-            if getattr(template_info, "document_type", None) is not None:
-                link.set_document_type(template_info.document_type)
+            if self._has_resolved_document_type(link):
+                template_info = Template(
+                    page,
+                    target_url,
+                    document_type=link.document_type,
+                )
+                if template_info.website_type is None:
+                    template_info.website_type = link.website_type
+            else:
+                active_template_factory = self._template_factory or Template.create
+                template_info = await active_template_factory(page, target_url)
+                if getattr(template_info, "document_type", None) is not None:
+                    link.set_document_type(template_info.document_type)
 
             active_scrape_fn = self._scrape_fn or start_scraping
             with task_execution_context(
@@ -612,19 +592,34 @@ class RichBatchReporter:
 
 
 # ---------------------------------------------------------------------------
-# Shared Browser Factory
+# Shared Browser Factory (Persistent Context + Anti-Bot Stealth)
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def open_shared_browser(
-    headless: bool = True,
-) -> AsyncGenerator[AsyncBrowser, None]:
-    """Launch a single shared Chromium Browser instance and close it on exit."""
+    headless: bool | None = None,
+    user_data_dir: Path | str | None = None,
+    *,
+    browser_config: BrowserConfig | None = None,
+) -> AsyncGenerator[AsyncBrowser | AsyncBrowserContext, None]:
+    """Launch a single shared Chromium persistent BrowserContext with anti-bot stealth settings."""
+    effective_config = (
+        browser_config or BrowserConfig.from_config()
+    ).with_overrides(
+        headless=headless,
+        user_data_dir=user_data_dir,
+    )
+    effective_config.user_data_dir.mkdir(parents=True, exist_ok=True)
+
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=headless)
+        context = await playwright.chromium.launch_persistent_context(
+            **effective_config.to_persistent_context_kwargs()
+        )
         try:
-            yield browser
+            if effective_config.stealth_init_script:
+                await context.add_init_script(effective_config.stealth_init_script)
+            yield context
         finally:
-            await _close_resource_quietly(browser)
+            await _close_resource_quietly(context)
 
 
 # ---------------------------------------------------------------------------
@@ -668,7 +663,10 @@ class BatchScraper:
             async with self._browser_factory() as managed_browser:
                 yield managed_browser
             return
-        async with open_shared_browser(headless=self._config.headless) as owned_browser:
+        async with open_shared_browser(
+            headless=self._config.headless,
+            browser_config=self._config.browser,
+        ) as owned_browser:
             yield owned_browser
 
     async def _expand_links(
@@ -817,8 +815,9 @@ def main(
 ) -> None:
     """Run the 3-phase async batch scraper from the command line."""
     cli_console = Console()
-    normalized_type = scrape_type.strip().lower()
-    if normalized_type not in {"d", "s"}:
+    try:
+        normalized_type = config.normalize_scrape_type(scrape_type)
+    except ValueError:
         cli_console.print(
             f"[bold red]Invalid --scrape-type {scrape_type!r}. Must be 'd' or 's'.[/bold red]"
         )
@@ -830,7 +829,7 @@ def main(
         )
         raise typer.Exit(code=1)
 
-    batch_config = BatchConfig(
+    batch_config = BatchConfig.from_config(
         output_dir=output,
         concurrency=concurrency,
         scrape_type=normalized_type,

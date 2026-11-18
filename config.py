@@ -1,4 +1,9 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
 import os
+from pathlib import Path
+from typing import Any
 
 
 def _load_dotenv(env_path: str | None = None) -> None:
@@ -31,11 +36,16 @@ def _load_dotenv(env_path: str | None = None) -> None:
 
 _load_dotenv()
 
+# ---------------------------------------------------------------------------
+# General Scraping Settings
+# ---------------------------------------------------------------------------
 OUTPUT_DIR = "output"  # relative path
+USER_DATA_DIR = ".browser_profile"  # persistent Chromium user data directory
 CONCURRENT_SCRAPER = 5  # maximum number of concurrent document scrapers sharing one browser
 FOLDER_MAX_DEPTH = 2
 API_CONCURRENCY = 20  # maximum number of viewer image requests per batch
 SCRAPE_TYPE = "d"  # "s": screenshot, "d": try to download directly
+VALID_SCRAPE_TYPES: frozenset[str] = frozenset({"d", "s"})
 MAX_CONCURENT_FOLDER_EXPLORER=5
 MAX_CONCURENT_FOLDER_NODE_VISIT=10 # determine the maximum number of folder to be visited and scraped in DriveFolderScraper.queue
 SCRAPE_TIMEOUT_SECONDS = 10
@@ -50,6 +60,301 @@ USE_GOOGLE_DRIVE_API = os.environ.get("USE_GOOGLE_DRIVE_API", "false").strip().l
 # Client-side rate limit: at most N requests per sliding window of P seconds.
 GOOGLE_DRIVE_API_RATE_LIMIT = 12000
 GOOGLE_DRIVE_API_RATE_PERIOD_SECONDS = 60
+
+# ---------------------------------------------------------------------------
+# Browser & Anti-Bot Stealth Settings
+# ---------------------------------------------------------------------------
+BROWSER_HEADLESS: bool = True
+BROWSER_ACCEPT_DOWNLOADS: bool = True
+BROWSER_LOCALE: str = "en-US"
+BROWSER_VIEWPORT: dict[str, int] = {"width": 1920, "height": 1080}
+BROWSER_WAIT_UNTIL: str = "domcontentloaded"
+VALID_WAIT_UNTIL_STATES: frozenset[str] = frozenset(
+    {"load", "domcontentloaded", "networkidle", "commit"}
+)
+
+ANTI_BOT_CHROMIUM_ARGS: tuple[str, ...] = (
+    "--disable-blink-features=AutomationControlled",
+    "--disable-infobars",
+    "--disable-dev-shm-usage",
+    "--no-sandbox",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-ipc-flooding-protection",
+)
+
+ANTI_BOT_IGNORE_DEFAULT_ARGS: tuple[str, ...] = ("--enable-automation",)
+
+DEFAULT_USER_AGENT: str = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+STEALTH_INIT_SCRIPT: str = """
+(() => {
+    Object.defineProperty(navigator, 'webdriver', {
+        get: () => undefined,
+        configurable: true
+    });
+
+    if (!window.chrome) {
+        Object.defineProperty(window, 'chrome', {
+            value: {
+                runtime: {},
+                loadTimes: () => ({}),
+                csi: () => ({}),
+                app: {}
+            },
+            configurable: true
+        });
+    }
+
+    Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-US', 'en'],
+        configurable: true
+    });
+
+    Object.defineProperty(navigator, 'plugins', {
+        get: () => [
+            { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+            { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+            { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }
+        ],
+        configurable: true
+    });
+
+    if (navigator.permissions && navigator.permissions.query) {
+        const originalQuery = navigator.permissions.query.bind(navigator.permissions);
+        navigator.permissions.query = (parameters) => (
+            parameters && parameters.name === 'notifications'
+                ? Promise.resolve({ state: Notification.permission })
+                : originalQuery(parameters)
+        );
+    }
+})();
+"""
+
+
+# ---------------------------------------------------------------------------
+# Configuration Helpers & Immutable Settings Models
+# ---------------------------------------------------------------------------
+def normalize_scrape_type(scrape_type: str) -> str:
+    """Normalize and validate a scrape type ('d' or 's')."""
+    normalized = str(scrape_type).strip().lower()
+    if normalized not in VALID_SCRAPE_TYPES:
+        raise ValueError(
+            f"Invalid scrape_type {scrape_type!r}. Must be 'd' or 's'."
+        )
+    return normalized
+
+
+@dataclass(frozen=True)
+class BrowserConfig:
+    """Immutable Playwright Chromium launch and anti-bot stealth configuration."""
+
+    user_data_dir: Path = field(default_factory=lambda: Path(USER_DATA_DIR))
+    headless: bool = field(default_factory=lambda: bool(BROWSER_HEADLESS))
+    accept_downloads: bool = field(
+        default_factory=lambda: bool(BROWSER_ACCEPT_DOWNLOADS)
+    )
+    args: tuple[str, ...] = field(default_factory=lambda: tuple(ANTI_BOT_CHROMIUM_ARGS))
+    ignore_default_args: tuple[str, ...] = field(
+        default_factory=lambda: tuple(ANTI_BOT_IGNORE_DEFAULT_ARGS)
+    )
+    user_agent: str = field(default_factory=lambda: str(DEFAULT_USER_AGENT))
+    viewport_width: int = field(
+        default_factory=lambda: int(BROWSER_VIEWPORT["width"])
+    )
+    viewport_height: int = field(
+        default_factory=lambda: int(BROWSER_VIEWPORT["height"])
+    )
+    locale: str = field(default_factory=lambda: str(BROWSER_LOCALE))
+    stealth_init_script: str = field(default_factory=lambda: str(STEALTH_INIT_SCRIPT))
+    wait_until: str = field(default_factory=lambda: str(BROWSER_WAIT_UNTIL))
+
+    def __post_init__(self) -> None:
+        if isinstance(self.user_data_dir, str):
+            if not self.user_data_dir.strip():
+                raise ValueError("user_data_dir must be a non-empty path")
+            object.__setattr__(self, "user_data_dir", Path(self.user_data_dir))
+        elif not isinstance(self.user_data_dir, Path):
+            object.__setattr__(self, "user_data_dir", Path(self.user_data_dir))
+
+        object.__setattr__(self, "headless", bool(self.headless))
+        object.__setattr__(self, "accept_downloads", bool(self.accept_downloads))
+
+        if isinstance(self.args, str):
+            raise TypeError("args must be a sequence of strings, not str")
+        object.__setattr__(self, "args", tuple(str(arg) for arg in self.args))
+
+        if isinstance(self.ignore_default_args, str):
+            raise TypeError(
+                "ignore_default_args must be a sequence of strings, not str"
+            )
+        object.__setattr__(
+            self,
+            "ignore_default_args",
+            tuple(str(arg) for arg in self.ignore_default_args),
+        )
+
+        if isinstance(self.viewport_width, bool) or isinstance(
+            self.viewport_height, bool
+        ):
+            raise ValueError("viewport_width and viewport_height must be integers")
+        width = int(self.viewport_width)
+        height = int(self.viewport_height)
+        if width < 1 or height < 1:
+            raise ValueError("viewport_width and viewport_height must be at least 1")
+        object.__setattr__(self, "viewport_width", width)
+        object.__setattr__(self, "viewport_height", height)
+
+        user_agent = str(self.user_agent).strip()
+        if not user_agent:
+            raise ValueError("user_agent must be a non-empty string")
+        object.__setattr__(self, "user_agent", user_agent)
+
+        locale = str(self.locale).strip()
+        if not locale:
+            raise ValueError("locale must be a non-empty string")
+        object.__setattr__(self, "locale", locale)
+
+        wait_until = str(self.wait_until).strip()
+        if wait_until not in VALID_WAIT_UNTIL_STATES:
+            raise ValueError(
+                f"Invalid wait_until {self.wait_until!r}. "
+                f"Must be one of {sorted(VALID_WAIT_UNTIL_STATES)}."
+            )
+        object.__setattr__(self, "wait_until", wait_until)
+        object.__setattr__(self, "stealth_init_script", str(self.stealth_init_script))
+
+    @property
+    def viewport(self) -> dict[str, int]:
+        """Return a fresh viewport dimensions dict for Playwright."""
+        return {"width": self.viewport_width, "height": self.viewport_height}
+
+    def with_overrides(
+        self,
+        *,
+        headless: bool | None = None,
+        user_data_dir: Path | str | None = None,
+        accept_downloads: bool | None = None,
+    ) -> BrowserConfig:
+        """Return a copy of this BrowserConfig with any non-None overrides applied."""
+        changes: dict[str, Any] = {}
+        if headless is not None:
+            changes["headless"] = bool(headless)
+        if user_data_dir is not None:
+            if isinstance(user_data_dir, str) and not user_data_dir.strip():
+                raise ValueError("user_data_dir must be a non-empty path")
+            changes["user_data_dir"] = Path(user_data_dir)
+        if accept_downloads is not None:
+            changes["accept_downloads"] = bool(accept_downloads)
+        if not changes:
+            return self
+        return replace(self, **changes)
+
+    def to_persistent_context_kwargs(self) -> dict[str, Any]:
+        """Build keyword arguments for Playwright's launch_persistent_context()."""
+        return {
+            "user_data_dir": str(self.user_data_dir),
+            "headless": self.headless,
+            "accept_downloads": self.accept_downloads,
+            "args": list(self.args),
+            "ignore_default_args": list(self.ignore_default_args),
+            "user_agent": self.user_agent,
+            "viewport": self.viewport,
+            "locale": self.locale,
+        }
+
+    @classmethod
+    def from_config(
+        cls,
+        *,
+        headless: bool | None = None,
+        user_data_dir: Path | str | None = None,
+        accept_downloads: bool | None = None,
+    ) -> BrowserConfig:
+        """Construct a BrowserConfig from module defaults with optional overrides."""
+        return cls().with_overrides(
+            headless=headless,
+            user_data_dir=user_data_dir,
+            accept_downloads=accept_downloads,
+        )
+
+
+@dataclass(frozen=True, init=False)
+class BatchConfig:
+    """Immutable configuration for a batch scraping run."""
+
+    output_dir: Path
+    concurrency: int
+    scrape_type: str
+    headless: bool
+    browser: BrowserConfig
+
+    def __init__(
+        self,
+        output_dir: Path | str | None = None,
+        concurrency: int | None = None,
+        scrape_type: str | None = None,
+        headless: bool | None = None,
+        browser: BrowserConfig | None = None,
+    ) -> None:
+        raw_output = OUTPUT_DIR if output_dir is None else output_dir
+        if isinstance(raw_output, str) and not raw_output.strip():
+            raise ValueError("output_dir must be a non-empty path")
+        resolved_output = Path(raw_output)
+
+        raw_concurrency = CONCURRENT_SCRAPER if concurrency is None else concurrency
+        if isinstance(raw_concurrency, bool) or int(raw_concurrency) < 1:
+            raise ValueError("concurrency must be at least 1")
+        resolved_concurrency = int(raw_concurrency)
+
+        resolved_scrape_type = normalize_scrape_type(
+            SCRAPE_TYPE if scrape_type is None else scrape_type
+        )
+
+        resolved_browser = (
+            browser if browser is not None else BrowserConfig.from_config()
+        )
+        resolved_headless = (
+            resolved_browser.headless if headless is None else bool(headless)
+        )
+        if resolved_browser.headless != resolved_headless:
+            resolved_browser = resolved_browser.with_overrides(
+                headless=resolved_headless
+            )
+
+        object.__setattr__(self, "output_dir", resolved_output)
+        object.__setattr__(self, "concurrency", resolved_concurrency)
+        object.__setattr__(self, "scrape_type", resolved_scrape_type)
+        object.__setattr__(self, "headless", resolved_headless)
+        object.__setattr__(self, "browser", resolved_browser)
+
+    @classmethod
+    def from_config(
+        cls,
+        *,
+        output_dir: Path | str | None = None,
+        concurrency: int | None = None,
+        scrape_type: str | None = None,
+        headless: bool | None = None,
+        browser: BrowserConfig | None = None,
+    ) -> BatchConfig:
+        """Construct a BatchConfig with optional overrides on top of config.py defaults."""
+        return cls(
+            output_dir=output_dir,
+            concurrency=concurrency,
+            scrape_type=scrape_type,
+            headless=headless,
+            browser=browser,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Google Drive DOM Icon Vectors
+# ---------------------------------------------------------------------------
 
 folder_icon_vector="""M20,6h-8l-2-2H4C2.9,4,2.01,4.9,2.01,6L2,18c0,1.1,0.9,2,2,2h16c1.1,0,2-0.9,2-2V8C22,6.9,21.1,6,20,6z M15,9 c1.1,0,2,0.9,2,2c0,1.1-0.9,2-2,2s-2-0.9-2-2C13,9.9,13.9,9,15,9z M19,17h-8v-0.57c0-0.81,0.48-1.53,1.22-1.85 C13.07,14.21,14.01,14,15,14c0.99,0,1.93,0.21,2.78,0.58C18.52,14.9,19,15.62,19,16.43V17z"""
 folder_icon_vector2="""M4 20C3.45 20 2.97917 19.8042 2.5875 19.4125C2.19583 19.0208 2 18.55 2 18V6C2 5.45 2.19583 4.97917 2.5875 4.5875C2.97917 4.19583 3.45 4 4 4H10L12 6H20C20.55 6 21.0208 6.19583 21.4125 6.5875C21.8042 6.97917 22 7.45 22 8V18C22 18.55 21.8042 19.0208 21.4125 19.4125C21.0208 19.8042 20.55 20 20 20H4ZM12 17C13.1 17 14.0417 16.6083 14.825 15.825C15.6083 15.0417 16 14.1 16 13C16 11.9 15.6083 10.9583 14.825 10.175C14.0417 9.39167 13.1 9 12 9C10.9 9 9.95833 9.39167 9.175 10.175C8.39167 10.9583 8 11.9 8 13C8 14.1 8.39167 15.0417 9.175 15.825C9.95833 16.6083 10.9 17 12 17ZM10.85 10.8C11.0333 10.7167 11.2167 10.6458 11.4 10.5875C11.5833 10.5292 11.7833 10.5 12 10.5C12.7 10.5 13.2917 10.7417 13.775 11.225C14.2583 11.7083 14.5 12.3 14.5 13C14.5 13.2167 14.4708 13.4167 14.4125 13.6C14.3542 13.7833 14.2833 13.9667 14.2 14.15L10.85 10.8ZM12 15.5C11.3 15.5 10.7083 15.2583 10.225 14.775C9.74167 14.2917 9.5 13.7 9.5 13C9.5 12.7833 9.52917 12.5833 9.5875 12.4C9.64583 12.2167 9.71667 12.0333 9.8 11.85L13.15 15.2C12.9667 15.2833 12.7833 15.3542 12.6 15.4125C12.4167 15.4708 12.2167 15.5 12 15.5Z"""

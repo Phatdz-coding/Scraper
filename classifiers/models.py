@@ -19,6 +19,7 @@ class DocumentType(Enum):
     ZIP_FOLDER = "zip_folder"
     UNSUPPORTED_FORMAT = "unsupported_format"
     SHORTCUT = "shortcut"
+    UNKNOWN = "unknown"
 
 
 class WebsiteType(Enum):

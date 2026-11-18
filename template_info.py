@@ -54,11 +54,28 @@ class Template:
         self.fileID = file_id if file_id is not None else self.get_fileID(url=url)
 
     @classmethod
-    async def create(cls, page: Page, url: str | None = None) -> "Template":
+    async def create(
+        cls,
+        page: Page,
+        url: str | None = None,
+        *,
+        website_type: WebsiteType | None = None,
+        document_type: DocumentType | None = None,
+    ) -> "Template":
         """Async factory that resolves website_type, document_type, and fileID from an async Page."""
-        instance = cls(page, url=url)
-        instance.website_type = await instance.get_website_type(url=url)
-        instance.document_type = await instance.__check_document_type(page)
+        instance = cls(
+            page,
+            url=url,
+            website_type=website_type,
+            document_type=document_type,
+        )
+        if instance.website_type is None:
+            instance.website_type = await instance.get_website_type(url=url)
+        if instance.document_type is None or instance.document_type in {
+            DocumentType.SHORTCUT,
+            DocumentType.UNKNOWN,
+        }:
+            instance.document_type = await instance.__check_document_type(page)
         instance.fileID = instance.get_fileID(url=url)
         return instance
 

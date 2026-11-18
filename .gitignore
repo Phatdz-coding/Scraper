@@ -5,3 +5,4 @@ __pycache__/
 .agents/
 .gemini/
 .venv/
+.browser_profile/

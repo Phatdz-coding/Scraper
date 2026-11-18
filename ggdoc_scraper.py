@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 
 from playwright.async_api import ConsoleMessage, Page, async_playwright
 
+from classifiers import DocumentType
 import config
 from process_images import (
     convert_image_to_jpeg,
@@ -142,7 +143,9 @@ async def scrape_inpage_by_script(
 
     file_id: str | None = None
     try:
-        template = await Template.create(page)
+        template = await Template.create(
+            page, document_type=DocumentType.MICROSOFT_WORD
+        )
         file_id = template.fileID
         total_pages = await template.get_total_pages()
     except Exception:
@@ -221,7 +224,9 @@ async def scrape_inpage_by_api(
             page.remove_listener("request", handle_request)
 
         try:
-            template = await Template.create(page)
+            template = await Template.create(
+                page, document_type=DocumentType.GOOGLE_DOC
+            )
             total_pages = await template.get_total_pages()
         except Exception:
             total_pages = 1

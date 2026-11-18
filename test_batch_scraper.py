@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 import io
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 import tempfile
 import unittest
@@ -15,12 +16,14 @@ from scrape import (
     BatchConfig,
     BatchScrapeResult,
     BatchScraper,
+    BrowserConfig,
     ClassifierLinkFilterer,
     DriveFolderExpander,
     PlaywrightAsyncLinkScraper,
     RichBatchReporter,
     ScrapeItemResult,
     app,
+    open_shared_browser,
 )
 from classifiers import (
     ClassifiedLink,
@@ -544,6 +547,84 @@ class TestPhase3ConcurrentScraping(unittest.IsolatedAsyncioTestCase):
             ["DuplicateName_1.pdf", "DuplicateName_2.pdf", "DuplicateName_3.pdf"],
         )
 
+    async def test_skips_document_type_check_when_already_known_and_checks_for_none_shortcut_unknown(self) -> None:
+        fake_browser = FakeAsyncBrowser()
+        template_factory_calls: list[str] = []
+
+        async def fake_template_create(page: FakeAsyncPage, url: str) -> MagicMock:
+            template_factory_calls.append(url)
+            tmpl = MagicMock(spec=Template)
+            tmpl.website_type = WebsiteType.GOOGLE_DRIVE
+            tmpl.document_type = DocumentType.PDF
+            tmpl.fileID = url.split("/")[-2]
+            return tmpl
+
+        seen_templates: list[Template] = []
+
+        async def fake_scrape_fn(page: FakeAsyncPage, tmpl: Template) -> Path:
+            seen_templates.append(tmpl)
+            return Path(f"{tmpl.fileID}.pdf")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            batch_cfg = BatchConfig(output_dir=Path(tmp_dir), concurrency=1)
+            link_scraper = PlaywrightAsyncLinkScraper(
+                template_factory=fake_template_create,
+                scrape_fn=fake_scrape_fn,
+            )
+
+            # 1. Pre-classified PDF link -> must skip template_factory
+            known_pdf_link = ClassifiedLink(
+                url="https://drive.google.com/file/d/KNOWN_PDF/view",
+                website_type=WebsiteType.GOOGLE_DRIVE,
+                document_type=DocumentType.PDF,
+            )
+            res_known = await link_scraper.scrape_one(
+                known_pdf_link, fake_browser, batch_cfg  # type: ignore[arg-type]
+            )
+            self.assertTrue(res_known.succeeded)
+            self.assertEqual(template_factory_calls, [])
+            self.assertEqual(seen_templates[-1].document_type, DocumentType.PDF)
+            self.assertEqual(seen_templates[-1].fileID, "KNOWN_PDF")
+
+            # 2. document_type is None -> must call template_factory
+            none_link = ClassifiedLink(
+                url="https://drive.google.com/file/d/NONE_DOC/view",
+                website_type=WebsiteType.GOOGLE_DRIVE,
+                document_type=None,
+            )
+            res_none = await link_scraper.scrape_one(
+                none_link, fake_browser, batch_cfg  # type: ignore[arg-type]
+            )
+            self.assertTrue(res_none.succeeded)
+            self.assertEqual(len(template_factory_calls), 1)
+            self.assertEqual(none_link.document_type, DocumentType.PDF)
+
+            # 3. document_type is SHORTCUT -> must call template_factory
+            shortcut_link = ClassifiedLink(
+                url="https://drive.google.com/file/d/SHORTCUT_DOC/view",
+                website_type=WebsiteType.GOOGLE_DRIVE,
+                document_type=DocumentType.SHORTCUT,
+            )
+            res_shortcut = await link_scraper.scrape_one(
+                shortcut_link, fake_browser, batch_cfg  # type: ignore[arg-type]
+            )
+            self.assertTrue(res_shortcut.succeeded)
+            self.assertEqual(len(template_factory_calls), 2)
+            self.assertEqual(shortcut_link.document_type, DocumentType.PDF)
+
+            # 4. document_type is UNKNOWN -> must call template_factory
+            unknown_link = ClassifiedLink(
+                url="https://drive.google.com/file/d/UNKNOWN_DOC/view",
+                website_type=WebsiteType.GOOGLE_DRIVE,
+                document_type=DocumentType.UNKNOWN,
+            )
+            res_unknown = await link_scraper.scrape_one(
+                unknown_link, fake_browser, batch_cfg  # type: ignore[arg-type]
+            )
+            self.assertTrue(res_unknown.succeeded)
+            self.assertEqual(len(template_factory_calls), 3)
+            self.assertEqual(unknown_link.document_type, DocumentType.PDF)
+
 
 # ---------------------------------------------------------------------------
 # Async Pipeline & Module Migration Unit Tests
@@ -1028,6 +1109,201 @@ class TestRichBatchReporterFormat(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Inaccessible folder (HTTP 403)", output)
         self.assertIn("Unsupported URL: https://drive.google.com/open?id=UNSUPPORTED_ID&authuser=0 | Tab Index: 0", output)
         self.assertIn("#Failures:\nNone\nTotal: 1 | Fail: 0", output)
+
+    async def test_open_shared_browser_uses_persistent_context_and_stealth_options(self) -> None:
+        fake_persistent_ctx = FakeAsyncContext(accept_downloads=True)
+        fake_persistent_ctx.add_init_script = AsyncMock()  # type: ignore[attr-defined]
+
+        fake_chromium = MagicMock()
+        fake_chromium.launch_persistent_context = AsyncMock(
+            return_value=fake_persistent_ctx
+        )
+
+        fake_pw = MagicMock()
+        fake_pw.chromium = fake_chromium
+
+        @asynccontextmanager
+        async def fake_async_playwright():
+            yield fake_pw
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            patch("scrape.async_playwright", side_effect=fake_async_playwright),
+        ):
+            profile_dir = Path(tmp_dir) / "profile"
+            async with open_shared_browser(
+                headless=True, user_data_dir=profile_dir
+            ) as shared_ctx:
+                self.assertIs(shared_ctx, fake_persistent_ctx)
+                fake_chromium.launch_persistent_context.assert_awaited_once()
+                call_kwargs = fake_chromium.launch_persistent_context.call_args.kwargs
+                self.assertEqual(call_kwargs["user_data_dir"], str(profile_dir))
+                self.assertTrue(call_kwargs["accept_downloads"])
+                self.assertIn(
+                    "--disable-blink-features=AutomationControlled",
+                    call_kwargs["args"],
+                )
+                self.assertIn(
+                    "--enable-automation",
+                    call_kwargs["ignore_default_args"],
+                )
+                self.assertNotIn("HeadlessChrome", call_kwargs["user_agent"])
+                fake_persistent_ctx.add_init_script.assert_awaited_once()
+
+                # Scraping a link on the persistent context closes the tab, not the context
+                scraper = PlaywrightAsyncLinkScraper(
+                    scrape_fn=AsyncMock(return_value=Path("doc.pdf"))
+                )
+                link = ClassifiedLink(
+                    url="https://drive.google.com/file/d/P1/view",
+                    website_type=WebsiteType.GOOGLE_DRIVE,
+                    document_type=DocumentType.PDF,
+                )
+                item_res = await scraper.scrape_one(
+                    link,
+                    shared_ctx,  # type: ignore[arg-type]
+                    BatchConfig(output_dir=Path(tmp_dir) / "out", concurrency=1),
+                )
+                self.assertTrue(item_res.succeeded)
+                self.assertFalse(fake_persistent_ctx.closed)
+                self.assertTrue(fake_persistent_ctx.pages[0].closed)
+
+            self.assertTrue(fake_persistent_ctx.closed)
+
+    async def test_open_shared_browser_uses_custom_browser_config_from_config_module(self) -> None:
+        fake_persistent_ctx = FakeAsyncContext(accept_downloads=False)
+        fake_persistent_ctx.add_init_script = AsyncMock()  # type: ignore[attr-defined]
+
+        fake_chromium = MagicMock()
+        fake_chromium.launch_persistent_context = AsyncMock(
+            return_value=fake_persistent_ctx
+        )
+
+        fake_pw = MagicMock()
+        fake_pw.chromium = fake_chromium
+
+        @asynccontextmanager
+        async def fake_async_playwright():
+            yield fake_pw
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            patch("scrape.async_playwright", side_effect=fake_async_playwright),
+        ):
+            profile_dir = Path(tmp_dir) / "custom_profile"
+            custom_browser = config.BrowserConfig(
+                user_data_dir=profile_dir,
+                headless=False,
+                accept_downloads=False,
+                args=("--no-sandbox",),
+                ignore_default_args=(),
+                user_agent="CustomAgent/1.0",
+                viewport_width=1280,
+                viewport_height=720,
+                locale="vi-VN",
+                stealth_init_script="",
+                wait_until="load",
+            )
+            async with open_shared_browser(browser_config=custom_browser) as shared_ctx:
+                self.assertIs(shared_ctx, fake_persistent_ctx)
+                call_kwargs = fake_chromium.launch_persistent_context.call_args.kwargs
+                self.assertEqual(call_kwargs["user_data_dir"], str(profile_dir))
+                self.assertFalse(call_kwargs["headless"])
+                self.assertFalse(call_kwargs["accept_downloads"])
+                self.assertEqual(call_kwargs["args"], ["--no-sandbox"])
+                self.assertEqual(call_kwargs["ignore_default_args"], [])
+                self.assertEqual(call_kwargs["user_agent"], "CustomAgent/1.0")
+                self.assertEqual(call_kwargs["viewport"], {"width": 1280, "height": 720})
+                self.assertEqual(call_kwargs["locale"], "vi-VN")
+                fake_persistent_ctx.add_init_script.assert_not_awaited()
+
+
+class TestConfigSeparation(unittest.IsolatedAsyncioTestCase):
+    def test_batch_and_browser_config_live_in_config_and_reexport_in_scrape(self) -> None:
+        self.assertIs(BatchConfig, config.BatchConfig)
+        self.assertIs(BrowserConfig, config.BrowserConfig)
+
+        default_batch = config.BatchConfig()
+        self.assertEqual(default_batch.output_dir, Path(config.OUTPUT_DIR))
+        self.assertEqual(default_batch.concurrency, config.CONCURRENT_SCRAPER)
+        self.assertEqual(default_batch.scrape_type, config.SCRAPE_TYPE)
+        self.assertEqual(default_batch.headless, config.BROWSER_HEADLESS)
+        self.assertEqual(default_batch.browser.user_data_dir, Path(config.USER_DATA_DIR))
+        self.assertEqual(default_batch.browser.viewport, config.BROWSER_VIEWPORT)
+        self.assertEqual(default_batch.browser.locale, config.BROWSER_LOCALE)
+        self.assertEqual(default_batch.browser.wait_until, config.BROWSER_WAIT_UNTIL)
+
+        with self.assertRaises(FrozenInstanceError):
+            default_batch.concurrency = 9  # type: ignore[misc]
+        with self.assertRaises(FrozenInstanceError):
+            default_batch.browser.locale = "fr-FR"  # type: ignore[misc]
+
+    def test_batch_and_browser_config_validation_and_dynamic_module_defaults(self) -> None:
+        with self.assertRaises(ValueError):
+            config.BrowserConfig(viewport_width=0)
+        with self.assertRaises(ValueError):
+            config.BrowserConfig(wait_until="invalid_state")
+        with self.assertRaises(TypeError):
+            config.BrowserConfig(args="--no-sandbox")  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            config.BatchConfig(concurrency=True)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            config.BatchConfig(output_dir="   ")
+
+        cfg_via_browser = config.BatchConfig(
+            browser=config.BrowserConfig(headless=False, locale="fr-FR")
+        )
+        self.assertFalse(cfg_via_browser.headless)
+        self.assertFalse(cfg_via_browser.browser.headless)
+        self.assertEqual(cfg_via_browser.browser.locale, "fr-FR")
+
+        cfg_via_flag = config.BatchConfig(headless=False)
+        self.assertFalse(cfg_via_flag.headless)
+        self.assertFalse(cfg_via_flag.browser.headless)
+
+        with (
+            patch.object(config, "OUTPUT_DIR", "custom_out"),
+            patch.object(config, "CONCURRENT_SCRAPER", 9),
+            patch.object(config, "SCRAPE_TYPE", "S"),
+            patch.object(config, "BROWSER_HEADLESS", False),
+            patch.object(config, "BROWSER_WAIT_UNTIL", "load"),
+        ):
+            dynamic_cfg = config.BatchConfig.from_config()
+            self.assertEqual(dynamic_cfg.output_dir, Path("custom_out"))
+            self.assertEqual(dynamic_cfg.concurrency, 9)
+            self.assertEqual(dynamic_cfg.scrape_type, "s")
+            self.assertFalse(dynamic_cfg.headless)
+            self.assertEqual(dynamic_cfg.browser.wait_until, "load")
+
+    async def test_link_scraper_respects_browser_config_wait_until_and_accept_downloads(self) -> None:
+        fake_browser = FakeAsyncBrowser()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            batch_cfg = config.BatchConfig(
+                output_dir=Path(tmp_dir),
+                browser=config.BrowserConfig(
+                    accept_downloads=False,
+                    wait_until="networkidle",
+                ),
+            )
+            scraper = PlaywrightAsyncLinkScraper(
+                scrape_fn=AsyncMock(return_value=Path("doc.pdf"))
+            )
+            link = ClassifiedLink(
+                url="https://drive.google.com/file/d/CFG_1/view",
+                website_type=WebsiteType.GOOGLE_DRIVE,
+                document_type=DocumentType.PDF,
+            )
+            res = await scraper.scrape_one(
+                link, fake_browser, batch_cfg  # type: ignore[arg-type]
+            )
+
+        self.assertTrue(res.succeeded)
+        self.assertEqual(len(fake_browser.contexts), 1)
+        self.assertFalse(fake_browser.contexts[0].accept_downloads)
+        self.assertEqual(
+            fake_browser.contexts[0].pages[0].goto_calls,
+            [("https://drive.google.com/file/d/CFG_1/view", "networkidle")],
+        )
 
 
 if __name__ == "__main__":
