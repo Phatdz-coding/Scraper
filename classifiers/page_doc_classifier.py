@@ -9,6 +9,7 @@ from html.parser import HTMLParser
 from typing import overload
 from urllib.parse import urlparse
 
+from playwright.async_api import Page as AsyncPage
 from playwright.sync_api import Page
 
 from classifiers.models import ClassifiedLink, DocumentType, WebsiteType
@@ -58,6 +59,27 @@ def _extract_page_title(page: Page) -> str:
     return ""
 
 
+async def _extract_page_title_async(page: AsyncPage) -> str:
+    """Extract the <title> from an async Playwright Page using await page.title() or HTMLParser fallback."""
+    try:
+        title = await page.title()
+        if isinstance(title, str) and title.strip():
+            return title.strip()
+    except Exception:
+        pass
+
+    try:
+        html = await page.content()
+        if isinstance(html, str) and html:
+            parser = _TitleParser()
+            parser.feed(html)
+            return "".join(parser.title_parts).strip()
+    except Exception:
+        pass
+
+    return ""
+
+
 class PageDocumentClassifierStrategy(ABC):
     """Strategy interface for resolving DocumentType from a loaded Playwright Page."""
 
@@ -69,6 +91,10 @@ class PageDocumentClassifierStrategy(ABC):
     @abstractmethod
     def classify_page(self, page: Page) -> DocumentType:
         """Inspect the Playwright Page and return its resolved DocumentType."""
+
+    async def classify_page_async(self, page: AsyncPage) -> DocumentType:
+        """Inspect an async Playwright Page and return its resolved DocumentType."""
+        return self.classify_page(page)  # type: ignore[arg-type]
 
 
 class GoogleDrivePageDocumentStrategy(PageDocumentClassifierStrategy):
@@ -148,6 +174,48 @@ class GoogleDrivePageDocumentStrategy(PageDocumentClassifierStrategy):
 
         return DocumentType.UNSUPPORTED_FORMAT
 
+    async def classify_page_async(self, page: AsyncPage) -> DocumentType:
+        page_url = page.url or ""
+        if "folder" in page_url.lower():
+            return DocumentType.FOLDER
+
+        title: str | None = None
+        try:
+            evaluated = await page.evaluate("() => window.viewerData?.config?.title")
+            if isinstance(evaluated, str) and evaluated.strip():
+                title = evaluated.strip()
+        except Exception:
+            pass
+
+        if not title:
+            try:
+                html = await page.content()
+                if isinstance(html, str):
+                    match = re.search(
+                        r"""window\.viewerData.*?['"]title['"]\s*:\s*['"]([^'"]+)['"]""",
+                        html,
+                        re.DOTALL,
+                    )
+                    if match:
+                        title = match.group(1)
+            except Exception:
+                pass
+
+        if title and "." in title:
+            ext = title.rsplit(".", 1)[-1].lower()
+            if ext in self._EXTENSION_MAP:
+                return self._EXTENSION_MAP[ext]
+
+        if "/file/" in urlparse(page_url).path:
+            try:
+                logo = page.locator(self._GOOGLE_DOC_LOGO_SELECTOR)
+                await logo.first.wait_for(state="attached", timeout=self._logo_timeout_ms)
+                return DocumentType.GOOGLE_DOC
+            except Exception:
+                pass
+
+        return DocumentType.UNSUPPORTED_FORMAT
+
 
 class GoogleDocPageDocumentStrategy(PageDocumentClassifierStrategy):
     """Playwright page-based DocumentType strategy for Google Docs, Sheets, and Slides pages."""
@@ -172,6 +240,22 @@ class GoogleDocPageDocumentStrategy(PageDocumentClassifierStrategy):
 
         return DocumentType.UNSUPPORTED_FORMAT
 
+    async def classify_page_async(self, page: AsyncPage) -> DocumentType:
+        page_url = page.url or ""
+        path = urlparse(page_url).path.lower()
+
+        if "/spreadsheets/" in path:
+            return DocumentType.XLSX
+        if "/presentation/" in path:
+            return DocumentType.PPTX
+        if "/document/" in path:
+            title = await _extract_page_title_async(page)
+            if ".docx" in title.lower():
+                return DocumentType.MICROSOFT_WORD
+            return DocumentType.GOOGLE_DOC
+
+        return DocumentType.UNSUPPORTED_FORMAT
+
 
 class ScribdPageDocumentStrategy(PageDocumentClassifierStrategy):
     """Playwright page-based DocumentType strategy for Scribd pages (always PDF)."""
@@ -181,6 +265,9 @@ class ScribdPageDocumentStrategy(PageDocumentClassifierStrategy):
         return WebsiteType.SCRIBD
 
     def classify_page(self, page: Page) -> DocumentType:
+        return DocumentType.PDF
+
+    async def classify_page_async(self, page: AsyncPage) -> DocumentType:
         return DocumentType.PDF
 
 
@@ -220,6 +307,15 @@ class PageDocumentClassifier:
             return DocumentType.UNSUPPORTED_FORMAT
         return strategy.classify_page(page)
 
+    async def resolve_document_type_async(
+        self, page: AsyncPage, website_type: WebsiteType
+    ) -> DocumentType:
+        """Determine DocumentType for the given async Playwright Page and WebsiteType."""
+        strategy = self._registry.get(website_type)
+        if strategy is None:
+            return DocumentType.UNSUPPORTED_FORMAT
+        return await strategy.classify_page_async(page)
+
     def classify_link(
         self, page: Page, link: ClassifiedLink, *, overwrite: bool = True
     ) -> ClassifiedLink:
@@ -227,6 +323,16 @@ class PageDocumentClassifier:
         if link.document_type is not None and not overwrite:
             return link
         doc_type = self.resolve_document_type(page, link.website_type)
+        link.set_document_type(doc_type)
+        return link
+
+    async def classify_link_async(
+        self, page: AsyncPage, link: ClassifiedLink, *, overwrite: bool = True
+    ) -> ClassifiedLink:
+        """Determine DocumentType from async page and update link.document_type in-place."""
+        if link.document_type is not None and not overwrite:
+            return link
+        doc_type = await self.resolve_document_type_async(page, link.website_type)
         link.set_document_type(doc_type)
         return link
 
@@ -256,6 +362,32 @@ class PageDocumentClassifier:
             f"Expected ClassifiedLink or WebsiteType, got {type(target).__name__}"
         )
 
+    @overload
+    async def classify_async(
+        self, page: AsyncPage, target: ClassifiedLink, *, overwrite: bool = True
+    ) -> ClassifiedLink: ...
+
+    @overload
+    async def classify_async(
+        self, page: AsyncPage, target: WebsiteType, *, overwrite: bool = True
+    ) -> DocumentType: ...
+
+    async def classify_async(
+        self,
+        page: AsyncPage,
+        target: ClassifiedLink | WebsiteType,
+        *,
+        overwrite: bool = True,
+    ) -> ClassifiedLink | DocumentType:
+        """Classify an async Playwright Page given either a ClassifiedLink or a WebsiteType."""
+        if isinstance(target, ClassifiedLink):
+            return await self.classify_link_async(page, target, overwrite=overwrite)
+        if isinstance(target, WebsiteType):
+            return await self.resolve_document_type_async(page, target)
+        raise TypeError(
+            f"Expected ClassifiedLink or WebsiteType, got {type(target).__name__}"
+        )
+
 
 @overload
 def classify_document_by_page(
@@ -277,3 +409,27 @@ def classify_document_by_page(
 ) -> ClassifiedLink | DocumentType:
     """Convenience function to run Stage 2b Playwright page-based document classification."""
     return PageDocumentClassifier().classify(page, target, overwrite=overwrite)
+
+
+@overload
+async def classify_document_by_page_async(
+    page: AsyncPage, target: ClassifiedLink, *, overwrite: bool = True
+) -> ClassifiedLink: ...
+
+
+@overload
+async def classify_document_by_page_async(
+    page: AsyncPage, target: WebsiteType, *, overwrite: bool = True
+) -> DocumentType: ...
+
+
+async def classify_document_by_page_async(
+    page: AsyncPage,
+    target: ClassifiedLink | WebsiteType,
+    *,
+    overwrite: bool = True,
+) -> ClassifiedLink | DocumentType:
+    """Async convenience function to run Stage 2b Playwright page-based document classification."""
+    return await PageDocumentClassifier().classify_async(
+        page, target, overwrite=overwrite
+    )

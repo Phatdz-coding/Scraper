@@ -32,7 +32,8 @@ def _load_dotenv(env_path: str | None = None) -> None:
 _load_dotenv()
 
 OUTPUT_DIR = "output"  # relative path
-FOLDER_MAX_DEPTH = 10
+CONCURRENT_SCRAPER = 5  # maximum number of concurrent document scrapers sharing one browser
+FOLDER_MAX_DEPTH = 2
 API_CONCURRENCY = 20  # maximum number of viewer image requests per batch
 SCRAPE_TYPE = "d"  # "s": screenshot, "d": try to download directly
 MAX_CONCURENT_FOLDER_EXPLORER=5

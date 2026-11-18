@@ -1,76 +1,120 @@
-import config
+from __future__ import annotations
+
+import asyncio
 import base64
-from html.parser import HTMLParser
-from pathlib import Path
 from functools import partial
-from urllib.parse import urlparse, parse_qs
-from urllib.parse import urlencode
+from pathlib import Path
+from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
-from template_info import Template
+
+from playwright.async_api import Browser, ConsoleMessage, Page, async_playwright
+
+import config
 from process_images import (
     convert_image_to_jpeg,
     fetch_image_batch,
     write_jpegs_as_pdf,
 )
-
-
-from playwright.sync_api import Browser, ConsoleMessage, Page, sync_playwright
-
-from tracker import scrape_progress
+from template_info import Template
+from tracker import (
+    ProgressReporter,
+    get_active_output_dir,
+    get_active_progress,
+    release_output_path,
+    reserve_output_path,
+    scrape_progress,
+)
 
 script = (Path(__file__).parent / "scripts/ggdrive_pdf.js").read_text(encoding="utf-8")
 PAGE_SCRAPED_MARKER = "__PDF_SCRAPER_PAGE_SCRAPED__"
 
 
-def _track_scraped_page(message: ConsoleMessage, total_pages: int) -> None:
+def _resolve_output_dir(output_dir: Path | str | None = None) -> Path:
+    if output_dir is not None:
+        destination = Path(output_dir)
+    else:
+        destination = get_active_output_dir() or Path(config.OUTPUT_DIR)
+    destination.mkdir(parents=True, exist_ok=True)
+    return destination
+
+
+def _resolve_progress(progress: ProgressReporter | None = None) -> ProgressReporter:
+    return progress or get_active_progress() or scrape_progress
+
+
+def _track_scraped_page(
+    message: ConsoleMessage,
+    total_pages: int,
+    progress: ProgressReporter | None = None,
+) -> None:
     if message.type == "log" and message.text == PAGE_SCRAPED_MARKER:
-        scrape_progress.increment(total_pages)
+        _resolve_progress(progress).increment(total_pages)
 
 
-def _download_pdf(page: Page, output_path: Path, total_pages: int) -> None:
-    callback = partial(_track_scraped_page, total_pages=total_pages)
+async def _download_pdf(
+    page: Page,
+    output_path: Path,
+    total_pages: int,
+    progress: ProgressReporter | None = None,
+) -> None:
+    callback = partial(_track_scraped_page, total_pages=total_pages, progress=progress)
     page.on("console", callback)
     try:
-        page.wait_for_selector('img[src^="blob:"]', timeout=60_000)
+        await page.wait_for_selector('img[src^="blob:"]', timeout=60_000)
 
-        with page.expect_download(timeout=600_000) as download_info:
-            page.evaluate(script)
+        async with page.expect_download(timeout=600_000) as download_info:
+            await page.evaluate(script)
 
-        download_info.value.save_as(str(output_path))
+        download = await download_info.value
+        await download.save_as(str(output_path))
     finally:
         page.remove_listener("console", callback)
 
 
-def scrape_in_url_by_script(URL: str) -> Path:
+async def scrape_in_url_by_script(
+    URL: str,
+    *,
+    output_dir: Path | str | None = None,
+    progress: ProgressReporter | None = None,
+) -> Path:
     """Save the PDF rendered by the target page and return its path."""
     parsed_url = urlparse(URL)
     if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
         raise ValueError("URL must be an absolute HTTP or HTTPS URL")
 
-    destination = Path(config.OUTPUT_DIR)
-    destination.mkdir(parents=True, exist_ok=True)
+    destination = _resolve_output_dir(output_dir)
 
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch()
         try:
-            page = browser.new_page(
-                accept_downloads=True,
+            page = await browser.new_page(accept_downloads=True)
+            await page.goto(URL, wait_until="domcontentloaded")
+            template = await Template.create(page, URL)
+            total_pages = await template.get_total_pages()
+            file_name = await template.get_file_name(await page.content())
+            output_path = await reserve_output_path(
+                destination, file_name, file_id=template.fileID
             )
-            page.goto(URL, wait_until="domcontentloaded")
-            template = Template(page, URL)
-            total_pages = template.get_total_pages()
-            output_path = destination / template.get_file_name(page.content())
-            _download_pdf(page, output_path, total_pages)
+            try:
+                await _download_pdf(page, output_path, total_pages, progress=progress)
+            except Exception:
+                release_output_path(output_path)
+                raise
         finally:
-            browser.close()
+            await browser.close()
 
     return output_path
 
 
-def scrape_in_browser_by_script(browser: Browser, document_name: str) -> Path:
+async def scrape_in_browser_by_script(
+    browser: Browser,
+    document_name: str,
+    *,
+    output_dir: Path | str | None = None,
+    progress: ProgressReporter | None = None,
+) -> Path:
     """Save the PDF from the browser's current page and return its path."""
-    destination = Path(config.OUTPUT_DIR)
-    destination.mkdir(parents=True, exist_ok=True)
+    destination = _resolve_output_dir(output_dir)
 
     if not browser.contexts:
         raise ValueError("Browser must have an open context")
@@ -80,35 +124,63 @@ def scrape_in_browser_by_script(browser: Browser, document_name: str) -> Path:
         raise ValueError("Browser context must have an open page")
 
     page = context.pages[-1]
-    total_pages = Template(page).get_total_pages()
-    output_path = destination / document_name
-    _download_pdf(page, output_path, total_pages)
+    template = await Template.create(page)
+    total_pages = await template.get_total_pages()
+    output_path = await reserve_output_path(
+        destination, document_name, file_id=template.fileID
+    )
+    try:
+        await _download_pdf(page, output_path, total_pages, progress=progress)
+    except Exception:
+        release_output_path(output_path)
+        raise
     return output_path
 
 
-def scrape_in_page_by_script(page: Page, document_name: str) -> Path:
+async def scrape_in_page_by_script(
+    page: Page,
+    document_name: str,
+    *,
+    output_dir: Path | str | None = None,
+    progress: ProgressReporter | None = None,
+) -> Path:
     """Save the PDF from the provided page and return its path."""
-    destination = Path(config.OUTPUT_DIR)
-    destination.mkdir(parents=True, exist_ok=True)
+    destination = _resolve_output_dir(output_dir)
 
-    total_pages = Template(page).get_total_pages()
-    output_path = destination / document_name
-    _download_pdf(page, output_path, total_pages)
+    template = await Template.create(page)
+    total_pages = await template.get_total_pages()
+    output_path = await reserve_output_path(
+        destination, document_name, file_id=template.fileID
+    )
+    try:
+        await _download_pdf(page, output_path, total_pages, progress=progress)
+    except Exception:
+        release_output_path(output_path)
+        raise
     return output_path
 
 
-def scrape_inpage_by_api(page: Page, document_name: str) -> Path:
+async def scrape_inpage_by_api(
+    page: Page,
+    document_name: str,
+    *,
+    output_dir: Path | str | None = None,
+    progress: ProgressReporter | None = None,
+) -> Path:
     """Download viewer images from the provided page and assemble them as a PDF."""
-    destination = Path(config.OUTPUT_DIR)
-    destination.mkdir(parents=True, exist_ok=True)
+    destination = _resolve_output_dir(output_dir)
+    active_progress = _resolve_progress(progress)
+    active_progress.reset()
 
-    scrape_progress.reset()
-    total_pages = Template(page).get_total_pages()
-    output_path = destination / document_name
+    template = await Template.create(page)
+    total_pages = await template.get_total_pages()
+    output_path = await reserve_output_path(
+        destination, document_name, file_id=template.fileID
+    )
 
     viewer_params: dict[str, str] = {}
 
-    def handle_request(request):
+    def handle_request(request) -> None:
         if "/viewer/img" in request.url:
             parsed_url = urlparse(request.url)
             query_params = parse_qs(parsed_url.query)
@@ -124,8 +196,8 @@ def scrape_inpage_by_api(page: Page, document_name: str) -> Path:
     try:
         page.on("request", handle_request)
         try:
-            page.reload(wait_until="domcontentloaded")
-            page.wait_for_timeout(2_000)
+            await page.reload(wait_until="domcontentloaded")
+            await page.wait_for_timeout(2_000)
         finally:
             page.remove_listener("request", handle_request)
 
@@ -165,7 +237,7 @@ def scrape_inpage_by_api(page: Page, document_name: str) -> Path:
             batch_endpoints = endpoints[
                 batch_start : batch_start + config.API_CONCURRENCY
             ]
-            responses = fetch_image_batch(page, batch_endpoints)
+            responses = await fetch_image_batch(page, batch_endpoints)
             stop_after_batch = False
 
             for response in responses:
@@ -174,9 +246,7 @@ def scrape_inpage_by_api(page: Page, document_name: str) -> Path:
                     stop_after_batch = True
                     break
                 if not isinstance(status, int) or not 200 <= status < 300:
-                    raise RuntimeError(
-                        f"Viewer API request failed with HTTP {status}"
-                    )
+                    raise RuntimeError(f"Viewer API request failed with HTTP {status}")
 
                 body = response["body"]
                 content_type = response["contentType"]
@@ -185,36 +255,27 @@ def scrape_inpage_by_api(page: Page, document_name: str) -> Path:
 
                 image = base64.b64decode(body)
                 if image[:2] != b"\xff\xd8":
-                    image = convert_image_to_jpeg(
+                    image = await convert_image_to_jpeg(
                         page, image, content_type.split(";", 1)[0]
                     )
                 images.append(image)
-                scrape_progress.increment(total_pages)
+                active_progress.increment(total_pages)
 
             if stop_after_batch:
                 break
 
         if not images:
             raise ValueError("Viewer API returned no PDF page images")
-        write_jpegs_as_pdf(images, output_path)
+        await asyncio.to_thread(write_jpegs_as_pdf, images, output_path)
         return output_path
+    except Exception:
+        release_output_path(output_path)
+        raise
     finally:
-        scrape_progress.finish()
+        active_progress.finish()
 
-def direct_download(file_id: str, document_name: str) -> tuple[Path | None, int]:
-    """Download a Google Drive file directly and return its path and status."""
-    if not file_id or not file_id.strip():
-        raise ValueError("fileID must be a non-empty string")
-    endpoint = "https://drive.usercontent.google.com/download"
-    request = Request(
-        f"{endpoint}?{urlencode({'id': file_id.strip(), 'export': 'download', 'authuser': '0'})}",
-        method="GET",
-    )
 
-    output_dir = Path(config.OUTPUT_DIR)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / document_name
-
+def _direct_download_sync(request: Request, output_path: Path) -> tuple[Path | None, int]:
     with urlopen(request) as response:
         response_status = response.status
         content_type = (
@@ -223,11 +284,44 @@ def direct_download(file_id: str, document_name: str) -> tuple[Path | None, int]
         if content_type == "text/html":
             return None, 404
         output_path.write_bytes(response.read())
-
     return output_path, response_status
 
 
+async def direct_download(
+    file_id: str,
+    document_name: str,
+    *,
+    output_dir: Path | str | None = None,
+) -> tuple[Path | None, int]:
+    """Download a Google Drive file directly and return its path and status without blocking the event loop."""
+    if not file_id or not file_id.strip():
+        raise ValueError("fileID must be a non-empty string")
+    endpoint = "https://drive.usercontent.google.com/download"
+    request = Request(
+        f"{endpoint}?{urlencode({'id': file_id.strip(), 'export': 'download', 'authuser': '0'})}",
+        method="GET",
+    )
+
+    destination = _resolve_output_dir(output_dir)
+    output_path = await reserve_output_path(
+        destination, document_name, file_id=file_id.strip()
+    )
+
+    try:
+        result_path, status = await asyncio.to_thread(
+            _direct_download_sync, request, output_path
+        )
+        if result_path is None:
+            release_output_path(output_path)
+        return result_path, status
+    except Exception:
+        release_output_path(output_path)
+        raise
+
+
 if __name__ == "__main__":
-    scrape_in_url_by_script(
-        "https://drive.google.com/file/d/10pYur59yGoU42E1D13YU_rbYModCl9xl/view"
+    asyncio.run(
+        scrape_in_url_by_script(
+            "https://drive.google.com/file/d/10pYur59yGoU42E1D13YU_rbYModCl9xl/view"
+        )
     )

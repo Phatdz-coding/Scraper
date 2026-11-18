@@ -19,7 +19,7 @@ import collections
 import random
 import threading
 import time
-from collections.abc import AsyncGenerator, Coroutine
+from collections.abc import AsyncGenerator, Coroutine, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -776,6 +776,50 @@ class DriveFolderScraper:
         await self._drain_queue_concurrently(reader)
         return self.discovered_file_urls
 
+    def seed_root_folders(
+        self,
+        folder_urls: Sequence[str],
+        settings: FolderScrapeSettings | None = None,
+    ) -> list[str]:
+        """Reset session state and seed all valid root folder URLs into ``self.queue`` at depth 0."""
+        self._start_session(settings)
+        seeded_ids: list[str] = []
+        seen_urls: set[str] = set()
+
+        for raw_url in folder_urls:
+            normalized = raw_url.strip() if isinstance(raw_url, str) else ""
+            try:
+                validate_drive_folder_url(normalized)
+            except ValueError as exc:
+                log_error(f"{exc}. Skipping.")
+                continue
+
+            root_id = extract_folder_id(normalized)
+            if root_id:
+                if root_id in self.visited_folder_ids:
+                    continue
+                self.visited_folder_ids.add(root_id)
+                seeded_ids.append(root_id)
+            elif normalized in seen_urls:
+                continue
+
+            seen_urls.add(normalized)
+            self.queue.append((normalized, 0))
+
+        return seeded_ids
+
+    async def crawl_many(
+        self,
+        folder_urls: Sequence[str],
+        reader: FolderElementReader,
+        settings: FolderScrapeSettings | None = None,
+    ) -> list[ClassifiedLink]:
+        """Seed multiple root folder URLs at depth 0 and drain ``self.queue`` concurrently."""
+        self.seed_root_folders(folder_urls, settings)
+        if self.queue:
+            await self._drain_queue_concurrently(reader)
+        return list(self.discovered_file_links)
+
     async def _drain_queue_concurrently(self, reader: FolderElementReader) -> None:
         """Dispatch queued folders as tasks while a concurrency slot is free, until
         the queue is empty and no folder is in flight."""
@@ -1103,6 +1147,101 @@ def scrape_classified(source: str | Page) -> list[ClassifiedLink]:
         A list of discovered ClassifiedLink instances in first-discovery order.
     """
     return _scrape_source(source).discovered_file_links
+
+
+def _scrape_many_by_api(
+    folder_ids: Sequence[str],
+    api_key: str,
+    scraper: DriveFolderScraper | None = None,
+) -> DriveFolderScraper:
+    """Recursively scrape multiple root Google Drive folders using the Drive v3 REST API."""
+    if not isinstance(api_key, str) or not api_key.strip():
+        raise ValueError("A Google API key is required to scrape by API.")
+    api_key = api_key.strip()
+
+    active_scraper = scraper or DriveFolderScraper.get_instance()
+    active_scraper.queue.clear()
+
+    valid_ids = [fid.strip() for fid in folder_ids if isinstance(fid, str) and fid.strip()]
+    if not valid_ids:
+        return active_scraper
+
+    workers = max(1, int(getattr(config, "MAX_CONCURENT_FOLDER_EXPLORER", 5)))
+    max_depth = getattr(config, "FOLDER_MAX_DEPTH", 5)
+    masked_key = f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) > 8 else "***"
+    for fid in valid_ids:
+        log_api_scrape_start(
+            fid,
+            max_depth=max_depth,
+            workers=workers,
+            api_key=masked_key,
+        )
+        active_scraper.visited_folder_ids.add(fid)
+
+    session = requests.Session()
+    session.mount("https://", HTTPAdapter(pool_connections=1, pool_maxsize=workers))
+    session.headers.update(
+        {"Accept-Encoding": "gzip", "User-Agent": "DriveFolderScraper (gzip)"}
+    )
+
+    try:
+        current_level = list(valid_ids)
+        depth = 0
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            while current_level:
+                next_level: list[str] = []
+                for items in executor.map(
+                    lambda pid: _api_list_children(session, pid, api_key),
+                    current_level,
+                ):
+                    next_level.extend(active_scraper._record_api_items(items, depth))
+                current_level = next_level
+                depth += 1
+    finally:
+        session.close()
+
+    return active_scraper
+
+
+async def scrape_many_classified(
+    folder_urls: Sequence[str],
+    browser: AsyncBrowser | None = None,
+    settings: FolderScrapeSettings | None = None,
+) -> list[ClassifiedLink]:
+    """Seed all ``folder_urls`` into ``DriveFolderScraper.queue`` and drain concurrently.
+
+    Reuses ``browser`` when supplied instead of launching a second Chromium instance.
+    """
+    if not folder_urls:
+        return []
+
+    scraper = DriveFolderScraper.get_instance()
+    active_settings = settings or FolderScrapeSettings.from_config()
+    root_ids = scraper.seed_root_folders(folder_urls, active_settings)
+    if not scraper.queue:
+        return []
+
+    if should_use_drive_api():
+        await asyncio.to_thread(
+            _scrape_many_by_api, root_ids, config.GOOGLE_API_KEY, scraper
+        )
+        return list(scraper.discovered_file_links)
+
+    if browser is not None:
+        async with _open_shared_context(browser) as context:
+            reader = PlaywrightFolderElementReader(
+                browser, active_settings, context=context
+            )
+            await scraper._drain_queue_concurrently(reader)
+    else:
+        async with launch_chromium(headless=active_settings.headless) as owned_browser:
+            async with _open_shared_context(owned_browser) as context:
+                reader = PlaywrightFolderElementReader(
+                    owned_browser, active_settings, context=context
+                )
+                await scraper._drain_queue_concurrently(reader)
+
+    return list(scraper.discovered_file_links)
 
 
 if __name__ == "__main__":

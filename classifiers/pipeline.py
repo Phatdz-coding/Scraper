@@ -6,6 +6,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import overload
 
+from playwright.async_api import Page as AsyncPage
 from playwright.sync_api import Page
 
 from classifiers.models import ClassifiedLink, DocumentType, WebsiteType
@@ -65,6 +66,28 @@ class LinkClassificationPipeline:
     ) -> ClassifiedLink | DocumentType:
         """Run Stage 2b: resolve DocumentType from an open Playwright Page."""
         return self.page_doc_classifier.classify(page, target, overwrite=overwrite)
+
+    @overload
+    async def classify_by_page_async(
+        self, page: AsyncPage, target: ClassifiedLink, *, overwrite: bool = False
+    ) -> ClassifiedLink: ...
+
+    @overload
+    async def classify_by_page_async(
+        self, page: AsyncPage, target: WebsiteType, *, overwrite: bool = False
+    ) -> DocumentType: ...
+
+    async def classify_by_page_async(
+        self,
+        page: AsyncPage,
+        target: ClassifiedLink | WebsiteType,
+        *,
+        overwrite: bool = False,
+    ) -> ClassifiedLink | DocumentType:
+        """Run Stage 2b: resolve DocumentType from an open async Playwright Page."""
+        return await self.page_doc_classifier.classify_async(
+            page, target, overwrite=overwrite
+        )
 
     @staticmethod
     def to_tags(links: Iterable[ClassifiedLink]) -> list[str]:

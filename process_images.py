@@ -2,7 +2,7 @@ import base64
 import struct
 from pathlib import Path
 
-from playwright.sync_api import Page
+from playwright.async_api import Page
 
 
 def jpeg_dimensions(image: bytes) -> tuple[int, int]:
@@ -35,9 +35,9 @@ def jpeg_dimensions(image: bytes) -> tuple[int, int]:
     raise ValueError("Could not determine JPEG dimensions")
 
 
-def convert_image_to_jpeg(page: Page, image: bytes, content_type: str) -> bytes:
+async def convert_image_to_jpeg(page: Page, image: bytes, content_type: str) -> bytes:
     encoded_image = base64.b64encode(image).decode("ascii")
-    jpeg_data = page.evaluate(
+    jpeg_data = await page.evaluate(
         """
         async ({dataUrl}) => {
             const image = new Image();
@@ -61,8 +61,8 @@ def convert_image_to_jpeg(page: Page, image: bytes, content_type: str) -> bytes:
     return base64.b64decode(jpeg_data)
 
 
-def fetch_image_batch(page: Page, endpoints: list[str]) -> list[dict[str, object]]:
-    return page.evaluate(
+async def fetch_image_batch(page: Page, endpoints: list[str]) -> list[dict[str, object]]:
+    return await page.evaluate(
         """
         async (urls) => {
             const encodeBody = (bytes) => {

@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import asyncio
 import base64
 import re
 from functools import partial
@@ -5,7 +8,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
-from playwright.sync_api import ConsoleMessage, Page, sync_playwright
+from playwright.async_api import ConsoleMessage, Page, async_playwright
 
 import config
 from process_images import (
@@ -14,85 +17,134 @@ from process_images import (
     write_jpegs_as_pdf,
 )
 from template_info import Template
-from tracker import scrape_progress
+from tracker import (
+    ProgressReporter,
+    get_active_output_dir,
+    get_active_progress,
+    release_output_path,
+    reserve_output_path,
+    scrape_progress,
+)
 
 script = (Path(__file__).parent / "scripts/ggdrive_ms_word.js").read_text(encoding="utf-8")
 PAGE_SCRAPED_MARKER = "__PDF_SCRAPER_PAGE_SCRAPED__"
 
 
-def _track_scraped_page(message: ConsoleMessage, total_pages: int) -> None:
+def _resolve_output_dir(output_dir: Path | str | None = None) -> Path:
+    if output_dir is not None:
+        destination = Path(output_dir)
+    else:
+        destination = get_active_output_dir() or Path(config.OUTPUT_DIR)
+    destination.mkdir(parents=True, exist_ok=True)
+    return destination
+
+
+def _resolve_progress(progress: ProgressReporter | None = None) -> ProgressReporter:
+    return progress or get_active_progress() or scrape_progress
+
+
+def _track_scraped_page(
+    message: ConsoleMessage,
+    total_pages: int,
+    progress: ProgressReporter | None = None,
+) -> None:
     if message.type == "log" and message.text == PAGE_SCRAPED_MARKER:
-        scrape_progress.increment(total_pages)
+        _resolve_progress(progress).increment(total_pages)
 
 
-def _download_doc(page: Page, output_path: Path, total_pages: int) -> None:
-    callback = partial(_track_scraped_page, total_pages=total_pages)
+async def _download_doc(
+    page: Page,
+    output_path: Path,
+    total_pages: int,
+    progress: ProgressReporter | None = None,
+) -> None:
+    active_progress = _resolve_progress(progress)
+    callback = partial(
+        _track_scraped_page, total_pages=total_pages, progress=active_progress
+    )
     page.on("console", callback)
     try:
-        page.wait_for_selector(
+        await page.wait_for_selector(
             'img[src^="blob:"], .kix-appview-editor, .a-b-r-La, [role="main"]',
             timeout=60_000,
         )
 
-        with page.expect_download(timeout=600_000) as download_info:
-            page.evaluate(script)
+        async with page.expect_download(timeout=600_000) as download_info:
+            await page.evaluate(script)
 
-        download_info.value.save_as(str(output_path))
+        download = await download_info.value
+        await download.save_as(str(output_path))
     finally:
         page.remove_listener("console", callback)
-        scrape_progress.finish()
+        active_progress.finish()
 
 
 _download_pdf = _download_doc
 
 
-def scrape_in_url_by_script(URL: str) -> Path:
+async def scrape_in_url_by_script(
+    URL: str,
+    *,
+    output_dir: Path | str | None = None,
+    progress: ProgressReporter | None = None,
+) -> Path:
     """Save the document rendered by the target page as PDF and return its path."""
     parsed_url = urlparse(URL)
     if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
         raise ValueError("URL must be an absolute HTTP or HTTPS URL")
 
-    destination = Path(config.OUTPUT_DIR)
-    destination.mkdir(parents=True, exist_ok=True)
+    destination = _resolve_output_dir(output_dir)
 
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch()
         try:
-            page = browser.new_page(
-                accept_downloads=True,
-            )
-            page.goto(URL, wait_until="domcontentloaded")
-            template = Template(page, URL)
+            page = await browser.new_page(accept_downloads=True)
+            await page.goto(URL, wait_until="domcontentloaded")
+            template = await Template.create(page, URL)
             try:
-                total_pages = template.get_total_pages()
+                total_pages = await template.get_total_pages()
             except Exception:
                 total_pages = 1
 
             try:
-                doc_name = template.get_file_name(page.content())
+                doc_name = await template.get_file_name(await page.content())
             except Exception:
-                doc_name = page.title() or "document.pdf"
+                doc_name = (await page.title()) or "document.pdf"
 
             if not doc_name.lower().endswith(".pdf"):
                 doc_name = (
                     re.sub(r"\.docx?$", "", doc_name, flags=re.IGNORECASE) + ".pdf"
                 )
 
-            output_path = destination / doc_name
-            _download_doc(page, output_path, total_pages)
+            output_path = await reserve_output_path(
+                destination, doc_name, file_id=template.fileID
+            )
+            try:
+                await _download_doc(page, output_path, total_pages, progress=progress)
+            except Exception:
+                release_output_path(output_path)
+                raise
         finally:
-            browser.close()
+            await browser.close()
 
     return output_path
 
 
-def scrape_inpage_by_script(page: Page, document_name: str) -> Path:
+async def scrape_inpage_by_script(
+    page: Page,
+    document_name: str,
+    *,
+    output_dir: Path | str | None = None,
+    progress: ProgressReporter | None = None,
+) -> Path:
     """Save the document from the provided page as PDF and return its path."""
-    destination = Path(config.OUTPUT_DIR)
-    destination.mkdir(parents=True, exist_ok=True)
+    destination = _resolve_output_dir(output_dir)
 
+    file_id: str | None = None
     try:
-        total_pages = Template(page).get_total_pages()
+        template = await Template.create(page)
+        file_id = template.fileID
+        total_pages = await template.get_total_pages()
     except Exception:
         total_pages = 1
 
@@ -101,12 +153,24 @@ def scrape_inpage_by_script(page: Page, document_name: str) -> Path:
             re.sub(r"\.docx?$", "", document_name, flags=re.IGNORECASE) + ".pdf"
         )
 
-    output_path = destination / document_name
-    _download_doc(page, output_path, total_pages)
+    output_path = await reserve_output_path(
+        destination, document_name, file_id=file_id
+    )
+    try:
+        await _download_doc(page, output_path, total_pages, progress=progress)
+    except Exception:
+        release_output_path(output_path)
+        raise
     return output_path
 
 
-def scrape_inpage_by_api(page: Page, document_name: str) -> Path:
+async def scrape_inpage_by_api(
+    page: Page,
+    document_name: str,
+    *,
+    output_dir: Path | str | None = None,
+    progress: ProgressReporter | None = None,
+) -> Path:
     """Download document viewer images from the page and assemble a PDF.
     IMPORTANT: this function only works if the page.url="https://drive.google.com/file/d/{fileID}/view"
     """
@@ -117,18 +181,16 @@ def scrape_inpage_by_api(page: Page, document_name: str) -> Path:
         or not re.fullmatch(r"/file/d/[^/]+/view/?", parsed_url.path)
     ):
         raise ValueError(
-            "Page URL must match "
-            "https://drive.google.com/file/{fileID}/view"
+            "Page URL must match https://drive.google.com/file/{fileID}/view"
         )
 
-    destination = Path(config.OUTPUT_DIR)
-    destination.mkdir(parents=True, exist_ok=True)
-
-    scrape_progress.reset()
+    destination = _resolve_output_dir(output_dir)
+    active_progress = _resolve_progress(progress)
+    active_progress.reset()
 
     if not document_name.lower().endswith(".pdf"):
         document_name = document_name + ".pdf"
-    output_path = destination / document_name
+    output_path = await reserve_output_path(destination, document_name)
 
     viewer_params: dict[str, str] = {}
 
@@ -148,18 +210,19 @@ def scrape_inpage_by_api(page: Page, document_name: str) -> Path:
     try:
         page.on("request", handle_request)
         try:
-            page.reload(wait_until="domcontentloaded")
-            page.wait_for_selector(
+            await page.reload(wait_until="domcontentloaded")
+            await page.wait_for_selector(
                 'span[jsname="Dt5gRb"], img[src*="/viewer/img"]',
                 state="attached",
                 timeout=30_000,
             )
-            page.wait_for_timeout(2_000)
+            await page.wait_for_timeout(2_000)
         finally:
             page.remove_listener("request", handle_request)
 
         try:
-            total_pages = Template(page).get_total_pages()
+            template = await Template.create(page)
+            total_pages = await template.get_total_pages()
         except Exception:
             total_pages = 1
 
@@ -193,7 +256,7 @@ def scrape_inpage_by_api(page: Page, document_name: str) -> Path:
 
         images: list[bytes] = []
         for batch_start in range(0, len(endpoints), config.API_CONCURRENCY):
-            responses = fetch_image_batch(
+            responses = await fetch_image_batch(
                 page,
                 endpoints[batch_start : batch_start + config.API_CONCURRENCY],
             )
@@ -214,25 +277,40 @@ def scrape_inpage_by_api(page: Page, document_name: str) -> Path:
 
                 image = base64.b64decode(body)
                 if image[:2] != b"\xff\xd8":
-                    image = convert_image_to_jpeg(
+                    image = await convert_image_to_jpeg(
                         page, image, content_type.split(";", 1)[0]
                     )
                 images.append(image)
-                scrape_progress.increment(total_pages)
+                active_progress.increment(total_pages)
 
             if stop_after_batch:
                 break
 
         if not images:
             raise ValueError("Viewer API returned no document page images")
-        write_jpegs_as_pdf(images, output_path)
+        await asyncio.to_thread(write_jpegs_as_pdf, images, output_path)
         return output_path
+    except Exception:
+        release_output_path(output_path)
+        raise
     finally:
-        scrape_progress.finish()
+        active_progress.finish()
 
 
-def direct_download(file_id: str, document_name: str) -> tuple[Path, int]:
-    """Download a Google Doc file directly as docx and return its path and status."""
+def _direct_download_sync(request: Request, output_path: Path) -> tuple[Path, int]:
+    with urlopen(request) as response:
+        response_status = response.status
+        output_path.write_bytes(response.read())
+    return output_path, response_status
+
+
+async def direct_download(
+    file_id: str,
+    document_name: str,
+    *,
+    output_dir: Path | str | None = None,
+) -> tuple[Path, int]:
+    """Download a Google Doc file directly as docx and return its path and status without blocking the event loop."""
     if not file_id or not file_id.strip():
         raise ValueError("fileID must be a non-empty string")
 
@@ -243,20 +321,25 @@ def direct_download(file_id: str, document_name: str) -> tuple[Path, int]:
         method="GET",
     )
 
-    output_dir = Path(config.OUTPUT_DIR)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / document_name
+    destination = _resolve_output_dir(output_dir)
+    output_path = await reserve_output_path(
+        destination, document_name, file_id=file_id.strip()
+    )
 
-    with urlopen(request) as response:
-        response_status = response.status
-        output_path.write_bytes(response.read())
+    try:
+        return await asyncio.to_thread(_direct_download_sync, request, output_path)
+    except Exception:
+        release_output_path(output_path)
+        raise
 
-    return output_path, response_status
 
 def switch_url_to_AllTabsView(url: str) -> str:
     """Convert a Google Docs URL to its Google Drive viewer URL."""
     parsed_url = urlparse(url)
-    if parsed_url.scheme not in {"http", "https"} or parsed_url.hostname != "docs.google.com":
+    if (
+        parsed_url.scheme not in {"http", "https"}
+        or parsed_url.hostname != "docs.google.com"
+    ):
         raise ValueError("URL must be a Google Docs URL")
 
     match = re.fullmatch(
@@ -269,6 +352,11 @@ def switch_url_to_AllTabsView(url: str) -> str:
     file_id = match.group(1)
     return f"https://drive.google.com/file/d/{file_id}/view"
 
+
 if __name__ == "__main__":
-    path,status = direct_download("15mUH39Zw_zsABKGTIWrf__eOx_4TOUgoRAyEkhFzbXE", "test.docx")
+    path, status = asyncio.run(
+        direct_download(
+            "15mUH39Zw_zsABKGTIWrf__eOx_4TOUgoRAyEkhFzbXE", "test.docx"
+        )
+    )
     print(status)

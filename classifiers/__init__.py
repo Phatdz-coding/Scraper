@@ -38,6 +38,7 @@ from classifiers.page_doc_classifier import (
     PageDocumentClassifierStrategy,
     ScribdPageDocumentStrategy,
     classify_document_by_page,
+    classify_document_by_page_async,
 )
 from classifiers.pipeline import LinkClassificationPipeline
 from classifiers.url_doc_classifier import (
@@ -107,6 +108,7 @@ __all__ = [
     "ScribdPageDocumentStrategy",
     "PageDocumentClassifier",
     "classify_document_by_page",
+    "classify_document_by_page_async",
     # Pipeline Coordinator
     "LinkClassificationPipeline",
 ]

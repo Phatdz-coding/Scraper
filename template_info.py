@@ -2,7 +2,7 @@
 this is a common component to track document/page info: page title, file/document name & total pages
 """
 
-from playwright.sync_api import Browser, ConsoleMessage, Page, sync_playwright
+from playwright.async_api import Browser, ConsoleMessage, Page, async_playwright
 from html.parser import HTMLParser
 import re
 from urllib.parse import parse_qs, urlparse
@@ -32,14 +32,37 @@ class _TitleParser(HTMLParser):
 
 
 class Template:
-    def __init__(self, page: Page, url: str | None = None):
+    def __init__(
+        self,
+        page: Page,
+        url: str | None = None,
+        *,
+        website_type: WebsiteType | None = None,
+        document_type: DocumentType | None = None,
+        file_id: str | None = None,
+    ) -> None:
         self.page = page
-        self.website_type = self.get_website_type(url=url)
-        self.document_type = self.__check_document_type(page)
-        self.fileID = self.get_fileID(url=url)
-        # self.isDownloadable = self.__check_for_download_availability(page)
+        self.url = url
+        if website_type is not None:
+            self.website_type = website_type
+        else:
+            candidate_url = url or (getattr(page, "url", None) if page else None)
+            self.website_type = (
+                self.__match_domain(candidate_url) if candidate_url else None  # type: ignore[assignment]
+            )
+        self.document_type = document_type  # type: ignore[assignment]
+        self.fileID = file_id if file_id is not None else self.get_fileID(url=url)
 
-    def __check_document_type(self, page: Page) -> DocumentType:
+    @classmethod
+    async def create(cls, page: Page, url: str | None = None) -> "Template":
+        """Async factory that resolves website_type, document_type, and fileID from an async Page."""
+        instance = cls(page, url=url)
+        instance.website_type = await instance.get_website_type(url=url)
+        instance.document_type = await instance.__check_document_type(page)
+        instance.fileID = instance.get_fileID(url=url)
+        return instance
+
+    async def __check_document_type(self, page: Page) -> DocumentType:
         """Determine the document type from viewer metadata or page structure."""
         if self.website_type == WebsiteType.GOOGLE_DRIVE:
             # in google drive template
@@ -57,12 +80,12 @@ class Template:
 
             title = None
             try:
-                title = page.evaluate("() => window.viewerData?.config?.title")
+                title = await page.evaluate("() => window.viewerData?.config?.title")
             except Exception:
                 pass
 
             if not title:
-                html = page.content()
+                html = await page.content()
                 match = re.search(
                     r"""window\.viewerData.*?['"]title['"]\s*:\s*['"]([^'"]+)['"]""",
                     html,
@@ -84,6 +107,7 @@ class Template:
                     "png": DocumentType.PNG,
                     "jpg": DocumentType.JPG,
                     "jpeg": DocumentType.JPEG,
+                    "zip": DocumentType.ZIP_FOLDER,
                 }
                 if ext in ext_map:
                     return ext_map[ext]
@@ -108,7 +132,7 @@ class Template:
                     '[rx="1"][fill="white"])'
                 )
                 try:
-                    logo.first.wait_for(state="attached", timeout=1_500)
+                    await logo.first.wait_for(state="attached", timeout=1_500)
                     return DocumentType.GOOGLE_DOC
                 except Exception:
                     pass
@@ -127,7 +151,7 @@ class Template:
                 return DocumentType.XLSX
             elif "/document/" in path:
                 parser = _TitleParser()
-                parser.feed(page.content())
+                parser.feed(await page.content())
                 title = "".join(parser.title_parts).strip()
                 if ".docx" in title.lower():
                     return DocumentType.MICROSOFT_WORD
@@ -144,7 +168,7 @@ class Template:
             f"Unable to determine document type for website {self.website_type} (url: {page.url})"
         )
 
-    def __check_for_download_availability(self, page: Page) -> bool:
+    async def __check_for_download_availability(self, page: Page) -> bool:
         if self.website_type in (WebsiteType.GOOGLE_DRIVE, WebsiteType.GOOGLE_DOC):
             # do check for the pdf template
             if self.document_type in (DocumentType.PDF, DocumentType.PPTX):
@@ -157,12 +181,12 @@ class Template:
                     locator = page.locator(
                         'span[jsname="orbTae"]:has-text("Ctrl+D"), span:has-text("Ctrl+D")'
                     )
-                    locator.first.wait_for(state="attached", timeout=1500)
-                    if locator.count() > 0:
+                    await locator.first.wait_for(state="attached", timeout=1500)
+                    if await locator.count() > 0:
                         return True
                 except Exception:
                     pass
-                html = page.content()
+                html = await page.content()
                 return "Ctrl+D" in html and (
                     "orbTae" in html or "aqdrmf-rymPhb-JMEf7e" in html
                 )
@@ -173,7 +197,7 @@ class Template:
                 # you can use the 'downloadable' : true to determine
                 match = re.search(
                     r"""['"]downloadable['"]\s*:\s*(true|false)""",
-                    page.content(),
+                    await page.content(),
                     re.IGNORECASE,
                 )
                 if match:
@@ -226,7 +250,7 @@ class Template:
 
         return None
 
-    def get_website_type(self, url: str | None = None) -> WebsiteType:
+    async def get_website_type(self, url: str | None = None) -> WebsiteType:
         """Determine the website type based on URL domain or HTML metadata in <head>.
 
         If *url* is provided the domain is checked first (fast path).
@@ -247,7 +271,7 @@ class Template:
                 return website
 
         # --- last resort: inspect HTML metadata --------------------------------
-        html = self.page.content()
+        html = await self.page.content()
 
         # Google Drive: <meta property="og:url" content="https://drive.google.com/file/d/....../">
         if "drive.google.com" in html:
@@ -281,12 +305,12 @@ class Template:
     # Page title
     # ------------------------------------------------------------------
 
-    def get_page_title(self) -> str:
+    async def get_page_title(self) -> str:
         """Extract the <title> text from the page's <head>.
 
         Uses Playwright's built-in ``page.title()`` for performance.
         """
-        title = self.page.title()
+        title = await self.page.title()
         if not title:
             raise ValueError("Page does not contain a non-empty <title>")
         return title
@@ -295,7 +319,7 @@ class Template:
     # File name
     # ------------------------------------------------------------------
 
-    def get_file_name(self, html_template: str | None = None) -> str:
+    async def get_file_name(self, html_template: str | None = None) -> str:
         """Extract the document file name from the page title.
 
         If *html_template* is provided the title is parsed from the raw HTML
@@ -315,7 +339,7 @@ class Template:
             if not title:
                 raise ValueError("HTML template does not contain a non-empty <title>")
         else:
-            title = self.get_page_title()
+            title = await self.get_page_title()
 
         if self.website_type == WebsiteType.GOOGLE_DRIVE:
             # e.g. "document.pdf - Google Drive" → "document.pdf"
@@ -337,7 +361,7 @@ class Template:
     # Total pages
     # ------------------------------------------------------------------
 
-    def get_total_pages(self) -> int:
+    async def get_total_pages(self) -> int:
         """Extract the total page count from the document viewer.
 
         Google Drive – reads the ``<span jsname="Dt5gRb">`` element that
@@ -346,17 +370,17 @@ class Template:
         Scribd – reads the ``<div data-e2e="total-pages">`` element.
         """
         if self.website_type == WebsiteType.GOOGLE_DRIVE:
-            return self.__get_total_pages_gd()
+            return await self.__get_total_pages_gd()
 
         if self.website_type == WebsiteType.GOOGLE_DOC:
-            return self.__get_total_pages_gdoc()
+            return await self.__get_total_pages_gdoc()
 
         if self.website_type == WebsiteType.SCRIBD:
-            return self.__get_total_pages_scribd()
+            return await self.__get_total_pages_scribd()
 
         raise ValueError(f"Unsupported website type: {self.website_type}")
 
-    def __get_total_pages_gd(self) -> int:
+    async def __get_total_pages_gd(self) -> int:
         """Extract total pages from the Google Drive document viewer.
 
         The viewer toolbar contains::
@@ -368,7 +392,7 @@ class Template:
         """
         if self.document_type == DocumentType.PDF:
             locator = self.page.locator('span[jsname="Dt5gRb"]')
-            return self.__read_positive_page_count(
+            return await self.__read_positive_page_count(
                 locator, 'span[jsname="Dt5gRb"]', "Google Drive viewer"
             )
         elif self.document_type in (
@@ -377,9 +401,9 @@ class Template:
         ):
             try:
                 locator = self.page.locator('span[jsname="Dt5gRb"]')
-                locator.first.wait_for(state="attached", timeout=30_000)
-                if locator.count() > 0:
-                    return self.__read_positive_page_count(
+                await locator.first.wait_for(state="attached", timeout=30_000)
+                if await locator.count() > 0:
+                    return await self.__read_positive_page_count(
                         locator, 'span[jsname="Dt5gRb"]', "Google Drive viewer"
                     )
             except Exception:
@@ -387,19 +411,19 @@ class Template:
             return 1
         return 1
 
-    def __get_total_pages_gdoc(self) -> int:
+    async def __get_total_pages_gdoc(self) -> int:
         """Extract total pages from the Google Docs viewer/editor."""
         try:
             locator = self.page.locator('span[jsname="Dt5gRb"]')
-            if locator.count() > 0:
-                return self.__read_positive_page_count(
+            if await locator.count() > 0:
+                return await self.__read_positive_page_count(
                     locator, 'span[jsname="Dt5gRb"]', "Google Docs viewer"
                 )
         except Exception:
             pass
 
         try:
-            count = self.page.locator(".kix-page").count()
+            count = await self.page.locator(".kix-page").count()
             if count > 0:
                 return count
         except Exception:
@@ -407,7 +431,7 @@ class Template:
 
         return 100
 
-    def __get_total_pages_scribd(self) -> int:
+    async def __get_total_pages_scribd(self) -> int:
         """Extract total pages from the Scribd document viewer.
 
         The viewer contains::
@@ -418,16 +442,16 @@ class Template:
         be present in the DOM before reading.
         """
         locator = self.page.locator('div[data-e2e="total-pages"]')
-        return self.__read_positive_page_count(
+        return await self.__read_positive_page_count(
             locator, 'div[data-e2e="total-pages"]', "Scribd viewer"
         )
 
-    def __read_positive_page_count(
+    async def __read_positive_page_count(
         self, locator, selector: str, viewer_name: str
     ) -> int:
         """Wait for a viewer's page-count element to contain a valid number."""
-        locator.wait_for(state="attached", timeout=30_000)
-        self.page.wait_for_function(
+        await locator.wait_for(state="attached", timeout=30_000)
+        await self.page.wait_for_function(
             """selector => [...document.querySelectorAll(selector)].some(
                 element => /^\\s*\\d+\\s*$/.test(element.textContent || '') &&
                     Number(element.textContent) > 0
@@ -436,7 +460,7 @@ class Template:
             timeout=30_000,
         )
 
-        for text in locator.all_text_contents():
+        for text in await locator.all_text_contents():
             match = re.fullmatch(r"\s*(\d+)\s*", text)
             if match and int(match.group(1)) > 0:
                 return int(match.group(1))
