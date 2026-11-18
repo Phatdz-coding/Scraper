@@ -15,12 +15,14 @@ from classifiers import DocumentType, WebsiteType
 import config
 import ggdoc_scraper
 import pdf_scraper
+import image_scraper
 from template_info import Template
 from tracker import (
     get_active_output_dir,
     get_active_scrape_type,
     is_live_progress_enabled,
 )
+
 
 def _log_console(message: str) -> None:
     if is_live_progress_enabled():
@@ -93,7 +95,9 @@ async def start_scraping(
         raise ValueError("A file ID is required for Google Drive and Google Docs")
 
     async def try_direct_download(
-        downloader: Callable[..., tuple[Path | None, int] | Awaitable[tuple[Path | None, int]]],
+        downloader: Callable[
+            ..., tuple[Path | None, int] | Awaitable[tuple[Path | None, int]]
+        ],
         name: str,
     ) -> Path | None:
         if active_scrape_type == "s":
@@ -161,13 +165,21 @@ async def start_scraping(
         return res
 
     if template_info.website_type == WebsiteType.GOOGLE_DRIVE:
-        if template_info.document_type == DocumentType.PDF:
+        if template_info.document_type in (DocumentType.PDF, DocumentType.PPTX):
             direct_path = await try_direct_download(
                 pdf_scraper.direct_download, document_name
             )
             if direct_path is not None:
                 return direct_path
             return await _call_inpage_scraper(pdf_scraper.scrape_inpage_by_api)
+
+        if template_info.document_type == DocumentType.IMAGE:
+            direct_path = await try_direct_download(
+                pdf_scraper.direct_download, document_name
+            )
+            if direct_path is not None:
+                return direct_path
+            return await _call_inpage_scraper(image_scraper.scrape_inpage_by_api)
 
         if template_info.document_type == DocumentType.MICROSOFT_WORD:
             direct_name = (

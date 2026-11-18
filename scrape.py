@@ -45,7 +45,7 @@ import config
 from config import BatchConfig, BrowserConfig
 import folder_scraper
 import ggdoc_scraper
-from simple_scrape import start_scraping
+from router import start_scraping
 from template_info import Template
 from tracker import (
     BatchErrorCollector,

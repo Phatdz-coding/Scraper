@@ -37,7 +37,7 @@ from folder_scraper import DriveFolderScraper
 import ggdoc_scraper
 import pdf_scraper
 from process_images import convert_image_to_jpeg, fetch_image_batch
-from simple_scrape import start_scraping
+from router import start_scraping
 from template_info import Template
 from tracker import OutputFilenameResolver, ScrapeProgress, suppress_live_progress
 
