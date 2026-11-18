@@ -324,3 +324,53 @@ def get_scraped_page_count() -> int:
     if active is not None:
         return active.get_count()
     return scrape_progress.get_count()
+
+
+class BatchErrorCollector:
+    """Thread-safe collector for non-item errors and skipped-item warnings during a batch run."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._errors: list[str] = []
+
+    def record(self, message: str) -> None:
+        cleaned = str(message).strip()
+        if not cleaned:
+            return
+        with self._lock:
+            if cleaned not in self._errors:
+                self._errors.append(cleaned)
+
+    def get_errors(self) -> list[str]:
+        with self._lock:
+            return list(self._errors)
+
+
+_active_error_collector_var: contextvars.ContextVar[BatchErrorCollector | None] = (
+    contextvars.ContextVar("active_error_collector", default=None)
+)
+
+
+@contextmanager
+def batch_error_context(
+    collector: BatchErrorCollector | None = None,
+) -> Iterator[BatchErrorCollector]:
+    """Bind a BatchErrorCollector to the current async/thread execution context."""
+    active_collector = collector or BatchErrorCollector()
+    token = _active_error_collector_var.set(active_collector)
+    try:
+        yield active_collector
+    finally:
+        _active_error_collector_var.reset(token)
+
+
+def get_active_error_collector() -> BatchErrorCollector | None:
+    """Return the active BatchErrorCollector if inside a batch run."""
+    return _active_error_collector_var.get()
+
+
+def record_batch_error(message: str) -> None:
+    """Record an error message on the active BatchErrorCollector if one is bound."""
+    collector = _active_error_collector_var.get()
+    if collector is not None:
+        collector.record(message)

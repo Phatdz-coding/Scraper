@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextvars
 import random
 import threading
 import time
@@ -48,6 +49,7 @@ import typer
 import config
 import classifiers
 from classifiers import ClassifiedLink, DocumentType, DriveElement
+from tracker import record_batch_error
 
 console = Console()
 
@@ -206,11 +208,13 @@ def should_use_drive_api() -> bool:
 def log_unsupported_element(file_id: str, tabindex: str | None) -> None:
     """Log unsupported element in orange warning format."""
     message = f"Unsupported URL: https://drive.google.com/open?id={file_id}&authuser=0 | Tab Index: {tabindex}"
+    record_batch_error(message)
     console.print(f"[bold orange1]{message}[/bold orange1]")
 
 
 def log_error(message: str) -> None:
     """Log error message in red."""
+    record_batch_error(message)
     console.print(f"[bold red]{message}[/bold red]")
 
 
@@ -737,10 +741,12 @@ class DriveFolderScraper:
             )
 
             if label == DocumentType.UNSUPPORTED_FORMAT:
-                log_warning(
+                unsupported_msg = (
                     f"Unsupported URL: https://drive.google.com/open?id={target_id} | "
                     f"Name: {item.get('name')!r} | MimeType: {item.get('mimeType')}"
                 )
+                record_batch_error(unsupported_msg)
+                log_warning(unsupported_msg)
                 continue
 
             if label == DocumentType.FOLDER:
@@ -1187,11 +1193,14 @@ def _scrape_many_by_api(
     try:
         current_level = list(valid_ids)
         depth = 0
+        parent_ctx = contextvars.copy_context()
         with ThreadPoolExecutor(max_workers=workers) as executor:
             while current_level:
                 next_level: list[str] = []
                 for items in executor.map(
-                    lambda pid: _api_list_children(session, pid, api_key),
+                    lambda pid: parent_ctx.copy().run(
+                        _api_list_children, session, pid, api_key
+                    ),
                     current_level,
                 ):
                     next_level.extend(active_scraper._record_api_items(items, depth))

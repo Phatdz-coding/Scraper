@@ -22,6 +22,7 @@ from playwright.async_api import (
     async_playwright,
 )
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -30,7 +31,6 @@ from rich.progress import (
     TextColumn,
     TimeElapsedColumn,
 )
-from rich.table import Table
 import typer
 
 from classifiers import (
@@ -47,7 +47,9 @@ import ggdoc_scraper
 from simple_scrape import start_scraping
 from template_info import Template
 from tracker import (
+    BatchErrorCollector,
     OutputFilenameResolver,
+    batch_error_context,
     suppress_live_progress,
     task_execution_context,
 )
@@ -130,6 +132,7 @@ class BatchScrapeResult:
     raw_urls: list[str]
     classified_links: list[ClassifiedLink]
     results: list[ScrapeItemResult]
+    errors: list[str] = field(default_factory=list)
 
     @property
     def succeeded_count(self) -> int:
@@ -138,6 +141,10 @@ class BatchScrapeResult:
     @property
     def failed_count(self) -> int:
         return sum(1 for item in self.results if not item.succeeded)
+
+    @property
+    def error_count(self) -> int:
+        return len(self.errors)
 
 
 # ---------------------------------------------------------------------------
@@ -548,39 +555,60 @@ class RichBatchReporter:
         self.print_summary(batch_result)
         self.summary_printed = True
 
-    def print_summary(self, batch_result: BatchScrapeResult) -> None:
-        table = Table(title="Batch Scrape Summary", show_lines=False)
-        table.add_column("#", justify="right", style="dim")
-        table.add_column("Status", justify="center")
-        table.add_column("Website / Type", style="cyan")
-        table.add_column("URL", overflow="fold")
-        table.add_column("Output / Error", overflow="fold")
+    def _print_errors(self, errors: Sequence[str]) -> None:
+        self.console.print("[bold red]#Errors:[/bold red]")
+        if not errors:
+            self.console.print("None", style="dim")
+            return
+        for error in errors:
+            self.console.print(error, markup=False, highlight=False, soft_wrap=True)
 
-        for idx, item in enumerate(batch_result.results, start=1):
-            status_badge = (
-                "[bold green]OK[/bold green]"
-                if item.succeeded
-                else "[bold red]FAIL[/bold red]"
-            )
+    def _print_failures(self, results: Sequence[ScrapeItemResult]) -> None:
+        self.console.print("[bold red]#Failures:[/bold red]")
+        failed_items = [item for item in results if not item.succeeded]
+        if not failed_items:
+            self.console.print("None", style="dim")
+            return
+
+        separator = "-" * 28
+        self.console.print(separator, style="dim")
+        for idx, item in enumerate(failed_items, start=1):
             doc_type = (
                 item.link.document_type.name
                 if item.link.document_type is not None
                 else "UNKNOWN"
             )
             type_label = f"{item.link.website_type.name}.{doc_type}"
-            detail = (
-                str(item.output_path)
-                if item.succeeded and item.output_path is not None
-                else (item.error or "Unknown error")
+            detail = item.error or "Unknown error"
+            self.console.print(f"[bold]No.{idx}[/bold]")
+            self.console.print(
+                f"[bold]URL:[/bold] {escape(item.link.url)}",
+                highlight=False,
+                soft_wrap=True,
             )
-            table.add_row(str(idx), status_badge, type_label, item.link.url, detail)
+            self.console.print(
+                f"[bold]Website/DocumentType:[/bold] {escape(type_label)}",
+                highlight=False,
+                soft_wrap=True,
+            )
+            self.console.print(
+                f"[bold]Log:[/bold] {escape(detail)}",
+                highlight=False,
+                soft_wrap=True,
+            )
+            self.console.print(separator, style="dim")
 
-        self.console.print(table)
+    def _print_totals(self, batch_result: BatchScrapeResult) -> None:
         self.console.print(
             f"[bold]Total:[/bold] {len(batch_result.results)} | "
-            f"[bold green]OK:[/bold green] {batch_result.succeeded_count} | "
-            f"[bold red]FAIL:[/bold red] {batch_result.failed_count}"
+            f"[bold red]Fail:[/bold red] {batch_result.failed_count}"
         )
+
+    def print_summary(self, batch_result: BatchScrapeResult) -> None:
+        """Render batch errors and failed items only in plain block format."""
+        self._print_errors(batch_result.errors)
+        self._print_failures(batch_result.results)
+        self._print_totals(batch_result)
 
 
 # ---------------------------------------------------------------------------
@@ -707,30 +735,36 @@ class BatchScraper:
         browser: AsyncBrowser | None = None,
     ) -> BatchScrapeResult:
         """Execute the 3-phase batch scrape asynchronously."""
-        # Phase 1: Filtering & Pre-Classification (no browser launched)
-        raw_urls, preclassified = self._filterer.filter_and_classify(source)
-        self._reporter.on_phase1_complete(raw_urls, preclassified)
+        error_collector = BatchErrorCollector()
+        with batch_error_context(error_collector):
+            # Phase 1: Filtering & Pre-Classification (no browser launched)
+            raw_urls, preclassified = self._filterer.filter_and_classify(source)
+            self._reporter.on_phase1_complete(raw_urls, preclassified)
 
-        if not preclassified:
-            empty_result = BatchScrapeResult(
-                raw_urls=raw_urls, classified_links=[], results=[]
-            )
-            self._reporter.on_batch_complete(empty_result)
-            return empty_result
+            if not preclassified:
+                empty_result = BatchScrapeResult(
+                    raw_urls=raw_urls,
+                    classified_links=[],
+                    results=[],
+                    errors=error_collector.get_errors(),
+                )
+                self._reporter.on_batch_complete(empty_result)
+                return empty_result
 
-        # Phases 2 & 3: Share a single Chromium Browser instance
-        async with self._acquire_browser(browser) as shared_browser:
-            expanded_links = await self._expand_links(
-                preclassified, shared_browser
-            )
-            results = await self._scrape_all_concurrently(
-                expanded_links, shared_browser
-            )
+            # Phases 2 & 3: Share a single Chromium Browser instance
+            async with self._acquire_browser(browser) as shared_browser:
+                expanded_links = await self._expand_links(
+                    preclassified, shared_browser
+                )
+                results = await self._scrape_all_concurrently(
+                    expanded_links, shared_browser
+                )
 
         batch_result = BatchScrapeResult(
             raw_urls=raw_urls,
             classified_links=expanded_links,
             results=results,
+            errors=error_collector.get_errors(),
         )
         self._reporter.on_batch_complete(batch_result)
         return batch_result
@@ -807,7 +841,14 @@ def main(
     try:
         result = asyncio.run(batch_scraper.run(source))
     except Exception as exc:
-        cli_console.print(f"[bold red]Batch scrape failed: {exc}[/bold red]")
+        reporter.on_batch_complete(
+            BatchScrapeResult(
+                raw_urls=[],
+                classified_links=[],
+                results=[],
+                errors=[f"Batch scrape failed: {exc}"],
+            )
+        )
         raise typer.Exit(code=1) from exc
 
     if not reporter.summary_printed:

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+import io
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from rich.console import Console
 from typer.testing import CliRunner
 
 from scrape import (
@@ -801,7 +803,10 @@ class TestBatchScraperCLI(unittest.TestCase):
         self.assertEqual(captured_configs[0].concurrency, 8)
         self.assertEqual(captured_configs[0].output_dir, out_dir)
         self.assertEqual(captured_configs[0].scrape_type, "s")
-        self.assertIn("OK", res.output)
+        self.assertIn("#Errors:", res.output)
+        self.assertIn("#Failures:", res.output)
+        self.assertIn("Total: 1 | Fail: 0", res.output)
+        self.assertNotIn("doc.pdf", res.output)
 
     def test_cli_exits_nonzero_when_any_item_fails_while_printing_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -845,9 +850,15 @@ class TestBatchScraperCLI(unittest.TestCase):
                 res = self.runner.invoke(app, [str(txt_file)])
 
         self.assertEqual(res.exit_code, 1)
-        self.assertIn("OK", res.output)
-        self.assertIn("FAIL", res.output)
-        self.assertIn("Download failed", res.output)
+        self.assertNotIn(url_ok, res.output)
+        self.assertNotIn("ok.pdf", res.output)
+        self.assertIn("#Errors:", res.output)
+        self.assertIn("#Failures:", res.output)
+        self.assertIn("No.1", res.output)
+        self.assertIn(f"URL: {url_fail}", res.output)
+        self.assertIn("Website/DocumentType: GOOGLE_DRIVE.PDF", res.output)
+        self.assertIn("Log: Download failed", res.output)
+        self.assertIn("Total: 2 | Fail: 1", res.output)
 
     def test_cli_exits_nonzero_on_invalid_scrape_type_or_missing_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -863,6 +874,160 @@ class TestBatchScraperCLI(unittest.TestCase):
                 app, [str(Path(tmp_dir) / "nonexistent.txt")]
             )
             self.assertEqual(missing_file_res.exit_code, 1)
+
+
+class TestRichBatchReporterFormat(unittest.IsolatedAsyncioTestCase):
+    def test_report_format_shows_errors_and_failures_only_without_wrapping_urls(self) -> None:
+        buf = io.StringIO()
+        test_console = Console(file=buf, width=50, force_terminal=False, color_system=None)
+        reporter = RichBatchReporter(test_console, enable_live_bar=False)
+
+        ok_link = ClassifiedLink(
+            url="https://drive.google.com/file/d/OK_FILE_ID/view",
+            website_type=WebsiteType.GOOGLE_DRIVE,
+            document_type=DocumentType.PDF,
+        )
+        fail_link_1 = ClassifiedLink(
+            url="https://drive.google.com/file/d/1mEvlHDjbEgke1tWHXo-XwU9FiGXeGa2A/view",
+            website_type=WebsiteType.GOOGLE_DRIVE,
+            document_type=DocumentType.PDF,
+        )
+        fail_link_2 = ClassifiedLink(
+            url="https://docs.google.com/document/d/SOME_LONG_DOC_ID_1234567890/edit",
+            website_type=WebsiteType.GOOGLE_DOC,
+            document_type=None,
+        )
+
+        batch_result = BatchScrapeResult(
+            raw_urls=[ok_link.url, fail_link_1.url, fail_link_2.url],
+            classified_links=[ok_link, fail_link_1, fail_link_2],
+            results=[
+                ScrapeItemResult(
+                    link=ok_link,
+                    output_path=Path("output/SuccessDoc.pdf"),
+                ),
+                ScrapeItemResult(
+                    link=fail_link_1,
+                    output_path=None,
+                    error="Could not capture viewer parameters from the page: id, fssid",
+                ),
+                ScrapeItemResult(
+                    link=fail_link_2,
+                    output_path=None,
+                    error="Error [503]: Service unavailable",
+                ),
+            ],
+            errors=[
+                "Unsupported website domain skipped: https://example.com/bad",
+                "Inaccessible folder (HTTP 403): https://drive.google.com/drive/folders/SECRET",
+            ],
+        )
+
+        reporter.print_summary(batch_result)
+        output = buf.getvalue()
+
+        expected = (
+            "#Errors:\n"
+            "Unsupported website domain skipped: https://example.com/bad\n"
+            "Inaccessible folder (HTTP 403): https://drive.google.com/drive/folders/SECRET\n"
+            "#Failures:\n"
+            "----------------------------\n"
+            "No.1\n"
+            "URL: https://drive.google.com/file/d/1mEvlHDjbEgke1tWHXo-XwU9FiGXeGa2A/view\n"
+            "Website/DocumentType: GOOGLE_DRIVE.PDF\n"
+            "Log: Could not capture viewer parameters from the page: id, fssid\n"
+            "----------------------------\n"
+            "No.2\n"
+            "URL: https://docs.google.com/document/d/SOME_LONG_DOC_ID_1234567890/edit\n"
+            "Website/DocumentType: GOOGLE_DOC.UNKNOWN\n"
+            "Log: Error [503]: Service unavailable\n"
+            "----------------------------\n"
+            "Total: 3 | Fail: 2\n"
+        )
+        self.assertEqual(output, expected)
+
+    def test_report_format_when_no_errors_and_no_failures(self) -> None:
+        buf = io.StringIO()
+        test_console = Console(file=buf, width=80, force_terminal=False, color_system=None)
+        reporter = RichBatchReporter(test_console, enable_live_bar=False)
+
+        ok_link = ClassifiedLink(
+            url="https://drive.google.com/file/d/OK_ONLY/view",
+            website_type=WebsiteType.GOOGLE_DRIVE,
+            document_type=DocumentType.PDF,
+        )
+        batch_result = BatchScrapeResult(
+            raw_urls=[ok_link.url],
+            classified_links=[ok_link],
+            results=[ScrapeItemResult(link=ok_link, output_path=Path("output/ok.pdf"))],
+        )
+
+        reporter.print_summary(batch_result)
+        self.assertEqual(
+            buf.getvalue(),
+            "#Errors:\nNone\n#Failures:\nNone\nTotal: 1 | Fail: 0\n",
+        )
+
+    async def test_batch_run_collects_phase1_and_phase2_errors_into_report(self) -> None:
+        DriveFolderScraper._reset_instance()
+        shared_browser = FakeAsyncBrowser()
+
+        @asynccontextmanager
+        async def fake_browser_factory():
+            yield shared_browser
+
+        async def fake_folder_scrape(
+            folder_urls: list[str], browser: object = None
+        ) -> list[ClassifiedLink]:
+            folder_scraper.log_error(
+                "Inaccessible folder (HTTP 403): https://drive.google.com/drive/folders/BROKEN. Skipping."
+            )
+            folder_scraper.log_unsupported_element("UNSUPPORTED_ID", "0")
+            return []
+
+        async def fake_template_create(page: FakeAsyncPage, url: str) -> MagicMock:
+            tmpl = MagicMock(spec=Template)
+            tmpl.website_type = WebsiteType.GOOGLE_DRIVE
+            tmpl.document_type = DocumentType.PDF
+            tmpl.fileID = "GOOD_1"
+            return tmpl
+
+        async def fake_scrape_fn(page: FakeAsyncPage, tmpl: Template) -> Path:
+            return Path("GOOD_1.pdf")
+
+        buf = io.StringIO()
+        test_console = Console(file=buf, width=120, force_terminal=False, color_system=None)
+        reporter = RichBatchReporter(test_console, enable_live_bar=False)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            batch_cfg = BatchConfig(output_dir=Path(tmp_dir), concurrency=2)
+            orchestrator = BatchScraper(
+                filterer=ClassifierLinkFilterer(),
+                folder_expander=DriveFolderExpander(folder_scraper_fn=fake_folder_scrape),
+                scraper=PlaywrightAsyncLinkScraper(
+                    template_factory=fake_template_create,
+                    scrape_fn=fake_scrape_fn,
+                ),
+                config=batch_cfg,
+                reporter=reporter,
+                browser_factory=fake_browser_factory,  # type: ignore[arg-type]
+            )
+
+            result = await orchestrator.run(
+                [
+                    "https://example.com/not-supported",
+                    "https://drive.google.com/drive/folders/BROKEN",
+                    "https://drive.google.com/file/d/GOOD_1/view",
+                ]
+            )
+
+        self.assertEqual(len(result.errors), 3)
+        output = buf.getvalue()
+        self.assertIn("#Errors:", output)
+        self.assertIn("Unsupported website domain skipped: https://example.com/not-supported", output)
+        self.assertIn("Inaccessible folder (HTTP 403)", output)
+        self.assertIn("Unsupported URL: https://drive.google.com/open?id=UNSUPPORTED_ID&authuser=0 | Tab Index: 0", output)
+        self.assertIn("#Failures:\nNone\nTotal: 1 | Fail: 0", output)
 
 
 if __name__ == "__main__":

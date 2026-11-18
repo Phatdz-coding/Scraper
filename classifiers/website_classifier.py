@@ -11,12 +11,14 @@ from rich.console import Console
 
 from classifiers.input_parser import InputParser, LinkInputParser
 from classifiers.models import ClassifiedLink, WebsiteType
+from tracker import record_batch_error
 
 console = Console()
 
 
 def log_classification_warning(message: str) -> None:
     """Log a classification warning message in bold orange using rich."""
+    record_batch_error(message)
     console.print(f"[bold orange1]{message}[/bold orange1]")
 
 
