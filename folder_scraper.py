@@ -1257,7 +1257,7 @@ if __name__ == "__main__":
     # config.USE_GOOGLE_DRIVE_API="true"
     with console.status("[bold white]Exploring folder[/bold white]", spinner="dots"):
         l = scrape_classified(
-            "https://drive.google.com/drive/folders/1g__ke0ZPOIrH7DcHocmLDqyltgsnkTjk"
+            "https://drive.google.com/drive/folders/{ID}"
         )
     for e in l:
         print(e)
