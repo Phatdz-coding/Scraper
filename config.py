@@ -65,6 +65,7 @@ GOOGLE_DRIVE_API_RATE_PERIOD_SECONDS = 60
 # Browser & Anti-Bot Stealth Settings
 # ---------------------------------------------------------------------------
 BROWSER_HEADLESS: bool = True
+BROWSER_CHANNEL: str | None = "chromium"
 BROWSER_ACCEPT_DOWNLOADS: bool = True
 BROWSER_LOCALE: str = "en-US"
 BROWSER_VIEWPORT: dict[str, int] = {"width": 1920, "height": 1080}
@@ -82,13 +83,14 @@ ANTI_BOT_CHROMIUM_ARGS: tuple[str, ...] = (
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
     "--disable-ipc-flooding-protection",
+    "--headless=new",
 )
 
 ANTI_BOT_IGNORE_DEFAULT_ARGS: tuple[str, ...] = ("--enable-automation",)
 
 DEFAULT_USER_AGENT: str = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36"
 )
 
 STEALTH_INIT_SCRIPT: str = """
@@ -155,6 +157,7 @@ class BrowserConfig:
 
     user_data_dir: Path = field(default_factory=lambda: Path(USER_DATA_DIR))
     headless: bool = field(default_factory=lambda: bool(BROWSER_HEADLESS))
+    channel: str | None = field(default_factory=lambda: BROWSER_CHANNEL)
     accept_downloads: bool = field(
         default_factory=lambda: bool(BROWSER_ACCEPT_DOWNLOADS)
     )
@@ -182,6 +185,11 @@ class BrowserConfig:
             object.__setattr__(self, "user_data_dir", Path(self.user_data_dir))
 
         object.__setattr__(self, "headless", bool(self.headless))
+        if self.channel is not None:
+            channel = str(self.channel).strip()
+            if not channel:
+                raise ValueError("channel must be a non-empty string or None")
+            object.__setattr__(self, "channel", channel)
         object.__setattr__(self, "accept_downloads", bool(self.accept_downloads))
 
         if isinstance(self.args, str):
@@ -237,6 +245,7 @@ class BrowserConfig:
         self,
         *,
         headless: bool | None = None,
+        channel: str | None = None,
         user_data_dir: Path | str | None = None,
         accept_downloads: bool | None = None,
     ) -> BrowserConfig:
@@ -244,6 +253,8 @@ class BrowserConfig:
         changes: dict[str, Any] = {}
         if headless is not None:
             changes["headless"] = bool(headless)
+        if channel is not None:
+            changes["channel"] = channel
         if user_data_dir is not None:
             if isinstance(user_data_dir, str) and not user_data_dir.strip():
                 raise ValueError("user_data_dir must be a non-empty path")
@@ -256,28 +267,46 @@ class BrowserConfig:
 
     def to_persistent_context_kwargs(self) -> dict[str, Any]:
         """Build keyword arguments for Playwright's launch_persistent_context()."""
-        return {
+        if self.headless:
+            args = list(self.args)
+            if not any(
+                arg == "--headless" or arg.startswith("--headless=") for arg in args
+            ):
+                args.append("--headless=new")
+        else:
+            args = [
+                arg
+                for arg in self.args
+                if arg != "--headless" and not arg.startswith("--headless=")
+            ]
+
+        kwargs: dict[str, Any] = {
             "user_data_dir": str(self.user_data_dir),
             "headless": self.headless,
             "accept_downloads": self.accept_downloads,
-            "args": list(self.args),
+            "args": args,
             "ignore_default_args": list(self.ignore_default_args),
             "user_agent": self.user_agent,
             "viewport": self.viewport,
             "locale": self.locale,
         }
+        if self.channel is not None:
+            kwargs["channel"] = self.channel
+        return kwargs
 
     @classmethod
     def from_config(
         cls,
         *,
         headless: bool | None = None,
+        channel: str | None = None,
         user_data_dir: Path | str | None = None,
         accept_downloads: bool | None = None,
     ) -> BrowserConfig:
         """Construct a BrowserConfig from module defaults with optional overrides."""
         return cls().with_overrides(
             headless=headless,
+            channel=channel,
             user_data_dir=user_data_dir,
             accept_downloads=accept_downloads,
         )

@@ -1442,6 +1442,8 @@ class TestConfigSeparation(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             config.BrowserConfig(viewport_width=0)
         with self.assertRaises(ValueError):
+            config.BrowserConfig(channel="   ")
+        with self.assertRaises(ValueError):
             config.BrowserConfig(wait_until="invalid_state")
         with self.assertRaises(TypeError):
             config.BrowserConfig(args="--no-sandbox")  # type: ignore[arg-type]
@@ -1504,6 +1506,18 @@ class TestConfigSeparation(unittest.IsolatedAsyncioTestCase):
             fake_browser.contexts[0].pages[0].goto_calls,
             [("https://drive.google.com/file/d/CFG_1/view", "networkidle")],
         )
+
+    def test_browser_config_new_headless_channel_and_args(self) -> None:
+        headless_cfg = config.BrowserConfig(headless=True)
+        headless_kwargs = headless_cfg.to_persistent_context_kwargs()
+        self.assertEqual(headless_kwargs["channel"], "chromium")
+        self.assertIn("--headless=new", headless_kwargs["args"])
+        self.assertIn("Chrome/156.0.0.0", headless_kwargs["user_agent"])
+
+        headed_cfg = config.BrowserConfig(headless=False, channel=None)
+        headed_kwargs = headed_cfg.to_persistent_context_kwargs()
+        self.assertNotIn("channel", headed_kwargs)
+        self.assertNotIn("--headless=new", headed_kwargs["args"])
 
 
 if __name__ == "__main__":
