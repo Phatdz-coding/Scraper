@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 import inspect
 from pathlib import Path
@@ -636,17 +636,41 @@ async def open_shared_browser(
     user_data_dir: Path | str | None = None,
     *,
     browser_config: BrowserConfig | None = None,
+    clean: bool = False,
 ) -> AsyncGenerator[AsyncBrowser | AsyncBrowserContext, None]:
-    """Launch a single shared Chromium persistent BrowserContext with anti-bot stealth settings."""
+    """Launch a shared Chromium browser.
+
+    When ``clean=False`` (default), opens a persistent ``BrowserContext`` with
+    the configured profile directory and anti-bot stealth settings.
+    When ``clean=True``, launches a clean ephemeral ``Browser`` (matching
+    ``playwright open``) without persistent cookies, custom User-Agent overrides,
+    or stealth scripts—needed for sites like Scribd that reject the persistent
+    stealth profile with ``net::ERR_HTTP_RESPONSE_CODE_FAILURE``.
+    """
     effective_config = (
         browser_config or BrowserConfig.from_config()
     ).with_overrides(
         headless=headless,
         user_data_dir=user_data_dir,
     )
-    effective_config.user_data_dir.mkdir(parents=True, exist_ok=True)
 
     async with async_playwright() as playwright:
+        if clean:
+            browser = await playwright.chromium.launch(
+                headless=effective_config.headless
+            )
+            context: AsyncBrowserContext | None = None
+            try:
+                context = await browser.new_context(
+                    accept_downloads=effective_config.accept_downloads
+                )
+                yield context
+            finally:
+                await _close_resource_quietly(context)
+                await _close_resource_quietly(browser)
+            return
+
+        effective_config.user_data_dir.mkdir(parents=True, exist_ok=True)
         context = await playwright.chromium.launch_persistent_context(
             **effective_config.to_persistent_context_kwargs()
         )
@@ -656,6 +680,174 @@ async def open_shared_browser(
             yield context
         finally:
             await _close_resource_quietly(context)
+
+
+# ---------------------------------------------------------------------------
+# Browser Mode Planning (headless vs. headed passes)
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class ScrapePass:
+    """A contiguous slice of the ordered batch scraped in one browser mode."""
+
+    links: tuple[ClassifiedLink, ...]
+    headless: bool
+    clean: bool = False
+
+
+class HeadedBrowserPolicy:
+    """Decides which websites need a headed browser and plans ordered scrape passes.
+
+    Websites that block headless Chromium (Scribd by default) are stably sorted to
+    the end of the batch so they can run in a single trailing clean headed pass.
+    """
+
+    DEFAULT_HEADED_SITES: frozenset[WebsiteType] = frozenset({WebsiteType.SCRIBD})
+
+    def __init__(self, headed_sites: frozenset[WebsiteType] | None = None) -> None:
+        self._headed_sites = (
+            self.DEFAULT_HEADED_SITES if headed_sites is None else frozenset(headed_sites)
+        )
+
+    def requires_headed(self, link: ClassifiedLink) -> bool:
+        return link.website_type in self._headed_sites
+
+    def order(self, links: Sequence[ClassifiedLink]) -> list[ClassifiedLink]:
+        """Return a stably sorted copy: headless-capable links first, headed-only links last."""
+        return sorted(links, key=self.requires_headed)
+
+    def plan(
+        self, ordered_links: Sequence[ClassifiedLink], *, headless: bool
+    ) -> list[ScrapePass]:
+        """Split already-ordered links into contiguous passes, preserving order."""
+        if not ordered_links:
+            return []
+        if not headless:
+            has_headed_only = any(
+                self.requires_headed(link) for link in ordered_links
+            )
+            return [
+                ScrapePass(
+                    tuple(ordered_links), headless=False, clean=has_headed_only
+                )
+            ]
+
+        headless_links = tuple(
+            link for link in ordered_links if not self.requires_headed(link)
+        )
+        headed_links = tuple(
+            link for link in ordered_links if self.requires_headed(link)
+        )
+        passes = (
+            [ScrapePass(headless_links, headless=True, clean=False)]
+            if headless_links
+            else []
+        )
+        if headed_links:
+            passes.append(ScrapePass(headed_links, headless=False, clean=True))
+        return passes
+
+
+# ---------------------------------------------------------------------------
+# Browser Sessions (owned/relaunchable vs. externally provided)
+# ---------------------------------------------------------------------------
+@runtime_checkable
+class BrowserSession(Protocol):
+    """Port that hands out a browser for a requested launch mode."""
+
+    @property
+    def active_browser(self) -> AsyncBrowser | None: ...
+
+    @property
+    def can_switch_mode(self) -> bool:
+        """True when acquire() honours the requested launch mode (may relaunch)."""
+        ...
+
+    async def acquire(self, headless: bool, *, clean: bool = False) -> AsyncBrowser: ...
+
+
+class FixedBrowserSession:
+    """Session over an externally owned browser: never closes or relaunches it.
+
+    The requested launch mode is a preference only; the provided browser is always returned.
+    """
+
+    def __init__(self, browser: AsyncBrowser) -> None:
+        self._browser = browser
+
+    @property
+    def active_browser(self) -> AsyncBrowser:
+        return self._browser
+
+    @property
+    def can_switch_mode(self) -> bool:
+        return False
+
+    async def acquire(self, headless: bool, *, clean: bool = False) -> AsyncBrowser:
+        return self._browser
+
+
+class RelaunchableBrowserSession:
+    """Lazily launches an owned browser and relaunches it when the launch mode changes.
+
+    The previous browser is fully closed before relaunching so the persistent
+    profile directory (USER_DATA_DIR) is unlocked for the next launch.
+    """
+
+    def __init__(
+        self,
+        launcher: Callable[[bool, bool], AbstractAsyncContextManager[AsyncBrowser]],
+    ) -> None:
+        self._launcher = launcher
+        self._exit_stack: AsyncExitStack | None = None
+        self._browser: AsyncBrowser | None = None
+        self._mode: tuple[bool, bool] | None = None
+
+    @property
+    def active_browser(self) -> AsyncBrowser | None:
+        return self._browser
+
+    @property
+    def can_switch_mode(self) -> bool:
+        return True
+
+    async def acquire(self, headless: bool, *, clean: bool = False) -> AsyncBrowser:
+        requested_mode = (headless, clean)
+        if self._browser is not None and self._mode == requested_mode:
+            return self._browser
+        await self.close()
+        return await self._launch(headless, clean)
+
+    async def _launch(self, headless: bool, clean: bool) -> AsyncBrowser:
+        exit_stack = AsyncExitStack()
+        browser = await exit_stack.enter_async_context(self._launcher(headless, clean))
+        self._exit_stack = exit_stack
+        self._browser = browser
+        self._mode = (headless, clean)
+        return browser
+
+    async def close(self) -> None:
+        exit_stack = self._exit_stack
+        self._exit_stack, self._browser, self._mode = None, None, None
+        if exit_stack is not None:
+            await exit_stack.aclose()
+
+    async def __aenter__(self) -> RelaunchableBrowserSession:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        await self.close()
+
+
+class _ProgressCounter:
+    """Shared Phase 3 completion counter spanning all scrape passes."""
+
+    def __init__(self, total: int) -> None:
+        self.total = total
+        self.completed = 0
+
+    def advance(self) -> int:
+        self.completed += 1
+        return self.completed
 
 
 # ---------------------------------------------------------------------------
@@ -674,6 +866,7 @@ class BatchScraper:
         reporter: BatchReporter | None = None,
         browser_factory: Callable[[], AbstractAsyncContextManager[AsyncBrowser]]
         | None = None,
+        headed_policy: HeadedBrowserPolicy | None = None,
     ) -> None:
         self._config = config or BatchConfig()
         self._filterer: LinkFilterer = filterer or ClassifierLinkFilterer()
@@ -683,6 +876,7 @@ class BatchScraper:
         self._scraper: LinkScraper = scraper or PlaywrightAsyncLinkScraper()
         self._reporter: BatchReporter = reporter or NullBatchReporter()
         self._browser_factory = browser_factory
+        self._headed_policy = headed_policy or HeadedBrowserPolicy()
 
     @property
     def config(self) -> BatchConfig:
@@ -705,17 +899,48 @@ class BatchScraper:
         ) as owned_browser:
             yield owned_browser
 
+    def _launch_owned_browser(
+        self, headless: bool, clean: bool = False
+    ) -> AbstractAsyncContextManager[AsyncBrowser]:
+        """Launch an owned shared browser from self._config.browser with the given launch mode."""
+        return open_shared_browser(
+            headless=headless,
+            browser_config=self._config.browser,
+            clean=clean,
+        )
+
+    @asynccontextmanager
+    async def _open_browser_session(
+        self, browser: AsyncBrowser | None = None
+    ) -> AsyncGenerator[BrowserSession, None]:
+        """Yield a fixed session for external/injected browsers, else a lazy relaunchable one."""
+        if browser is not None or self._browser_factory is not None:
+            async with self._acquire_browser(browser) as external_browser:
+                yield FixedBrowserSession(external_browser)
+            return
+        async with RelaunchableBrowserSession(self._launch_owned_browser) as session:
+            yield session
+
+    @staticmethod
+    def _count_folders(links: Sequence[ClassifiedLink]) -> int:
+        return sum(1 for link in links if link.document_type == DocumentType.FOLDER)
+
+    async def _browser_for_expansion(
+        self,
+        links: Sequence[ClassifiedLink],
+        session: BrowserSession,
+    ) -> AsyncBrowser | None:
+        """Launch a browser for Phase 2 only when folder links need expanding."""
+        if self._count_folders(links) == 0:
+            return session.active_browser
+        return await session.acquire(self._config.headless)
+
     async def _expand_links(
         self,
         classified_links: Sequence[ClassifiedLink],
-        browser: AsyncBrowser,
+        browser: AsyncBrowser | None,
     ) -> list[ClassifiedLink]:
-        folder_count = sum(
-            1
-            for link in classified_links
-            if link.document_type == DocumentType.FOLDER
-        )
-        self._reporter.on_phase2_start(folder_count)
+        self._reporter.on_phase2_start(self._count_folders(classified_links))
 
         sig = inspect.signature(self._folder_expander.expand)
         if "browser" in sig.parameters:
@@ -728,39 +953,130 @@ class BatchScraper:
         self._reporter.on_phase2_complete(expanded)
         return expanded
 
+    @staticmethod
+    def _single_pass(
+        links: Sequence[ClassifiedLink], headless: bool
+    ) -> list[ScrapePass]:
+        return [ScrapePass(tuple(links), headless=headless)] if links else []
+
+    def _plan_passes(
+        self,
+        ordered_links: Sequence[ClassifiedLink],
+        session: BrowserSession,
+    ) -> list[ScrapePass]:
+        """Plan headless/headed passes; non-switchable (external) sessions get one pass."""
+        if not session.can_switch_mode:
+            return self._single_pass(ordered_links, self._config.headless)
+        return self._headed_policy.plan(
+            ordered_links, headless=self._config.headless
+        )
+
+    @staticmethod
+    def _failed_result(link: ClassifiedLink, exc: BaseException) -> ScrapeItemResult:
+        error_msg = str(exc).strip() or type(exc).__name__
+        return ScrapeItemResult(link=link, output_path=None, error=error_msg)
+
+    def _report_item_complete(
+        self, result: ScrapeItemResult, counter: _ProgressCounter
+    ) -> None:
+        self._reporter.on_item_complete(result, counter.advance(), counter.total)
+
+    async def _scrape_one_safely(
+        self, link: ClassifiedLink, browser: AsyncBrowser
+    ) -> ScrapeItemResult:
+        try:
+            return await self._scraper.scrape_one(link, browser, self._config)
+        except Exception as exc:
+            return self._failed_result(link, exc)
+
+    async def _scrape_links(
+        self,
+        links: Sequence[ClassifiedLink],
+        browser: AsyncBrowser,
+        counter: _ProgressCounter,
+    ) -> list[ScrapeItemResult]:
+        """Scrape links concurrently (bounded by config.concurrency) on one browser."""
+        semaphore = asyncio.Semaphore(self._config.concurrency)
+
+        async def _worker(link: ClassifiedLink) -> ScrapeItemResult:
+            async with semaphore:
+                self._reporter.on_item_start(link)
+                result = await self._scrape_one_safely(link, browser)
+                self._report_item_complete(result, counter)
+                return result
+
+        return list(await asyncio.gather(*(_worker(link) for link in links)))
+
+    def _fail_pass(
+        self,
+        scrape_pass: ScrapePass,
+        exc: BaseException,
+        counter: _ProgressCounter,
+    ) -> list[ScrapeItemResult]:
+        """Mark every link of a pass as failed when its browser could not be launched."""
+        mode = "headless" if scrape_pass.headless else "headed"
+        reason = str(exc).strip() or type(exc).__name__
+        launch_error = RuntimeError(f"Failed to launch {mode} browser: {reason}")
+        results = [self._failed_result(link, launch_error) for link in scrape_pass.links]
+        for result in results:
+            self._report_item_complete(result, counter)
+        return results
+
+    async def _run_pass(
+        self,
+        scrape_pass: ScrapePass,
+        session: BrowserSession,
+        counter: _ProgressCounter,
+    ) -> list[ScrapeItemResult]:
+        try:
+            browser = await session.acquire(
+                scrape_pass.headless, clean=scrape_pass.clean
+            )
+        except Exception as exc:
+            return self._fail_pass(scrape_pass, exc, counter)
+        return await self._scrape_links(scrape_pass.links, browser, counter)
+
+    async def _scrape_passes(
+        self,
+        passes: Sequence[ScrapePass],
+        session: BrowserSession,
+    ) -> list[ScrapeItemResult]:
+        """Run passes sequentially with one continuous Phase 3 progress bar."""
+        counter = _ProgressCounter(sum(len(p.links) for p in passes))
+        if counter.total == 0:
+            return []
+
+        self._reporter.on_phase3_start(counter.total)
+        results: list[ScrapeItemResult] = []
+        with suppress_live_progress():
+            for scrape_pass in passes:
+                results.extend(await self._run_pass(scrape_pass, session, counter))
+        return results
+
     async def _scrape_all_concurrently(
         self,
         links: Sequence[ClassifiedLink],
         browser: AsyncBrowser,
     ) -> list[ScrapeItemResult]:
-        total = len(links)
-        if total == 0:
-            return []
+        """Single-pass Phase 3 on one given browser (kept for backward compatibility)."""
+        return await self._scrape_passes(
+            self._single_pass(links, self._config.headless),
+            FixedBrowserSession(browser),
+        )
 
-        semaphore = asyncio.Semaphore(self._config.concurrency)
-        completed_count = 0
-        self._reporter.on_phase3_start(total)
-
-        async def _worker(link: ClassifiedLink) -> ScrapeItemResult:
-            nonlocal completed_count
-            async with semaphore:
-                self._reporter.on_item_start(link)
-                try:
-                    result = await self._scraper.scrape_one(
-                        link, browser, self._config
-                    )
-                except Exception as exc:
-                    error_msg = str(exc).strip() or type(exc).__name__
-                    result = ScrapeItemResult(
-                        link=link, output_path=None, error=error_msg
-                    )
-                completed_count += 1
-                self._reporter.on_item_complete(result, completed_count, total)
-                return result
-
-        with suppress_live_progress():
-            results = await asyncio.gather(*(_worker(link) for link in links))
-        return list(results)
+    async def _expand_and_scrape(
+        self,
+        preclassified: Sequence[ClassifiedLink],
+        browser: AsyncBrowser | None,
+    ) -> tuple[list[ClassifiedLink], list[ScrapeItemResult]]:
+        """Phases 2 & 3: expand folders, order links (headed-only last), scrape in passes."""
+        async with self._open_browser_session(browser) as session:
+            phase2_browser = await self._browser_for_expansion(preclassified, session)
+            expanded = await self._expand_links(preclassified, phase2_browser)
+            ordered_links = self._headed_policy.order(expanded)
+            passes = self._plan_passes(ordered_links, session)
+            results = await self._scrape_passes(passes, session)
+        return ordered_links, results
 
     async def run(
         self,
@@ -785,18 +1101,14 @@ class BatchScraper:
                 self._reporter.on_batch_complete(empty_result)
                 return empty_result
 
-            # Phases 2 & 3: Share a single Chromium Browser instance
-            async with self._acquire_browser(browser) as shared_browser:
-                expanded_links = await self._expand_links(
-                    preclassified, shared_browser
-                )
-                results = await self._scrape_all_concurrently(
-                    expanded_links, shared_browser
-                )
+            # Phases 2 & 3: headless pass first, then a headed pass for Scribd links
+            ordered_links, results = await self._expand_and_scrape(
+                preclassified, browser
+            )
 
         batch_result = BatchScrapeResult(
             raw_urls=raw_urls,
-            classified_links=expanded_links,
+            classified_links=ordered_links,
             results=results,
             errors=error_collector.get_errors(),
         )
