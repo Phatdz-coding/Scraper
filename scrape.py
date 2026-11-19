@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 import inspect
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+from urllib.parse import urlparse
 
 from playwright.async_api import (
     Browser as AsyncBrowser,
@@ -919,9 +920,38 @@ def _was_passed_on_cli(ctx: typer.Context, param_name: str) -> bool:
     return getattr(source, "name", None) == "COMMANDLINE"
 
 
+def resolve_cli_source(raw_source: str) -> Path | str:
+    """Resolve a CLI source argument to either an HTTP(S) URL string or an existing file Path.
+
+    Raises ValueError with a user-facing error message when the value is neither
+    a valid HTTP(S) URL nor an existing file.
+    """
+    cleaned = raw_source.strip()
+    if (
+        len(cleaned) >= 2
+        and cleaned[0] == cleaned[-1]
+        and cleaned[0] in {'"', "'"}
+    ):
+        cleaned = cleaned[1:-1].strip()
+
+    if not cleaned:
+        raise ValueError("Input source cannot be empty.")
+
+    parsed = urlparse(cleaned)
+    if parsed.scheme.lower() in {"http", "https"}:
+        if not parsed.netloc:
+            raise ValueError(f"Invalid URL (missing domain): {cleaned}")
+        return cleaned
+
+    source_path = Path(cleaned)
+    if not source_path.exists() or not source_path.is_file():
+        raise ValueError(f"Input file does not exist: {source_path}")
+    return source_path
+
+
 app = typer.Typer(
     name="batch-scrape",
-    help="Batch scrape documents from a .txt file using a single shared Chromium browser.",
+    help="Batch scrape documents from a .txt file or a single URL using a single shared Chromium browser.",
     add_completion=False,
 )
 
@@ -929,9 +959,9 @@ app = typer.Typer(
 @app.command(cls=OptionalValueOptionCommand)
 def main(
     ctx: typer.Context,
-    source: Path = typer.Argument(
+    source: str = typer.Argument(
         ...,
-        help="Path to the .txt file containing document/folder URLs to scrape.",
+        help="Path to a .txt file of URLs, or a single document/folder URL to scrape.",
     ),
     concurrency: int = typer.Option(
         config.CONCURRENT_SCRAPER,
@@ -1016,11 +1046,11 @@ def main(
         )
         raise typer.Exit(code=1)
 
-    if not source.exists() or not source.is_file():
-        cli_console.print(
-            f"[bold red]Input file does not exist: {source}[/bold red]"
-        )
-        raise typer.Exit(code=1)
+    try:
+        resolved_source = resolve_cli_source(source)
+    except ValueError as exc:
+        cli_console.print(f"[bold red]{exc}[/bold red]")
+        raise typer.Exit(code=1) from exc
 
     overrides = RuntimeConfigOverrides(
         headless_disable=headless_disable,
@@ -1055,7 +1085,7 @@ def main(
     batch_scraper = BatchScraper(config=batch_config, reporter=reporter)
 
     try:
-        result = asyncio.run(batch_scraper.run(source))
+        result = asyncio.run(batch_scraper.run(resolved_source))
     except Exception as exc:
         reporter.on_batch_complete(
             BatchScrapeResult(

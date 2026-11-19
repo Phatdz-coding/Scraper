@@ -24,6 +24,7 @@ from scrape import (
     ScrapeItemResult,
     app,
     open_shared_browser,
+    resolve_cli_source,
 )
 from classifiers import (
     ClassifiedLink,
@@ -1464,6 +1465,105 @@ class TestBatchScraperCLI(unittest.TestCase):
         self.assertEqual(config.BROWSER_HEADLESS, orig_headless)
         self.assertEqual(config.FOLDER_TIMEOUT, orig_timeout)
         self.assertEqual(config.MAX_FOLDER_DEPTH, orig_depth)
+
+    def test_cli_accepts_single_url_and_preserves_scheme(self) -> None:
+        url_cases = [
+            ("https://drive.google.com/file/d/123/view", "https://drive.google.com/file/d/123/view"),
+            (
+                "https://drive.google.com/file/d/123/view?usp=sharing&authuser=0",
+                "https://drive.google.com/file/d/123/view?usp=sharing&authuser=0",
+            ),
+            (
+                '"https://drive.google.com/drive/folders/FOLDER_ABC"',
+                "https://drive.google.com/drive/folders/FOLDER_ABC",
+            ),
+            (
+                "http://docs.google.com/document/d/DOC_1/edit",
+                "http://docs.google.com/document/d/DOC_1/edit",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_dir = Path(tmp_dir) / "out"
+            for raw_arg, expected_url in url_cases:
+                with self.subTest(url_arg=raw_arg):
+                    captured_sources: list[object] = []
+                    fake_result = self._make_success_result(expected_url, out_dir)
+
+                    async def fake_run(
+                        scraper_self: BatchScraper, source: object, **kwargs: object
+                    ) -> BatchScrapeResult:
+                        captured_sources.append(source)
+                        return fake_result
+
+                    with patch.object(BatchScraper, "run", new=fake_run):
+                        res = self.runner.invoke(app, [raw_arg, "-o", str(out_dir)])
+
+                    self.assertEqual(res.exit_code, 0, msg=res.output)
+                    self.assertEqual(captured_sources, [expected_url])
+                    self.assertIsInstance(captured_sources[0], str)
+
+    def test_cli_single_url_with_optional_use_gg_api_flag(self) -> None:
+        folder_url = "https://drive.google.com/drive/folders/FOLDER_XYZ"
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_dir = Path(tmp_dir) / "out"
+            fake_result = self._make_success_result(folder_url, out_dir)
+            captured_sources: list[object] = []
+
+            async def fake_run(
+                scraper_self: BatchScraper, source: object, **kwargs: object
+            ) -> BatchScrapeResult:
+                captured_sources.append(source)
+                return fake_result
+
+            cases = [
+                (["--use-gg-api", folder_url], "EXISTING_KEY"),
+                ([folder_url, "--use-gg-api"], "EXISTING_KEY"),
+                (["-ugga", "CLI_KEY_1", folder_url], "CLI_KEY_1"),
+                ([folder_url, "-ugga", "CLI_KEY_2"], "CLI_KEY_2"),
+                (["--use-gg-api=CLI_KEY_3", folder_url], "CLI_KEY_3"),
+            ]
+            for argv, expected_key in cases:
+                with self.subTest(argv=argv):
+                    config.USE_GOOGLE_DRIVE_API = False
+                    config.GOOGLE_API_KEY = "EXISTING_KEY"
+                    captured_sources.clear()
+                    with patch.object(BatchScraper, "run", new=fake_run):
+                        res = self.runner.invoke(app, argv)
+                    self.assertEqual(res.exit_code, 0, msg=res.output)
+                    self.assertTrue(config.USE_GOOGLE_DRIVE_API)
+                    self.assertEqual(config.GOOGLE_API_KEY, expected_key)
+                    self.assertEqual(captured_sources, [folder_url])
+
+    def test_resolve_cli_source_validates_files_and_urls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            txt_file = Path(tmp_dir) / "links.txt"
+            txt_file.write_text("https://drive.google.com/file/d/1/view\n", encoding="utf-8")
+
+            self.assertEqual(resolve_cli_source(str(txt_file)), txt_file)
+            self.assertEqual(
+                resolve_cli_source("https://drive.google.com/file/d/1/view"),
+                "https://drive.google.com/file/d/1/view",
+            )
+            self.assertEqual(
+                resolve_cli_source("'https://drive.google.com/file/d/1/view'"),
+                "https://drive.google.com/file/d/1/view",
+            )
+
+            # ClassifierLinkFilterer parses a resolved single URL cleanly
+            raw_urls, classified = ClassifierLinkFilterer().filter_and_classify(
+                resolve_cli_source("https://drive.google.com/file/d/1/view")
+            )
+            self.assertEqual(raw_urls, ["https://drive.google.com/file/d/1/view"])
+            self.assertEqual(len(classified), 1)
+            self.assertEqual(classified[0].website_type, WebsiteType.GOOGLE_DRIVE)
+
+            for bad in ("", "   ", "https://", "http://", str(Path(tmp_dir) / "missing.txt"), tmp_dir):
+                with self.subTest(bad_source=bad):
+                    with self.assertRaises(ValueError):
+                        resolve_cli_source(bad)
+
+            malformed_res = self.runner.invoke(app, ["https://"])
+            self.assertEqual(malformed_res.exit_code, 1)
 
 
 class TestRichBatchReporterFormat(unittest.IsolatedAsyncioTestCase):
