@@ -13,8 +13,12 @@ from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontext
 from dataclasses import dataclass, field
 import inspect
 from pathlib import Path
+import sys
 from typing import Protocol, runtime_checkable
 from urllib.parse import urlparse
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from playwright.async_api import (
     Browser as AsyncBrowser,

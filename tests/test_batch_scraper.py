@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from rich.console import Console
 from typer.testing import CliRunner
 
-from scrape.scrape import (
+from scrape.main import (
     BatchConfig,
     BatchScrapeResult,
     BatchScraper,
@@ -1732,7 +1732,7 @@ class TestRichBatchReporterFormat(unittest.IsolatedAsyncioTestCase):
 
         with (
             tempfile.TemporaryDirectory() as tmp_dir,
-            patch("scrape.scrape.async_playwright", side_effect=fake_async_playwright),
+            patch("scrape.main.async_playwright", side_effect=fake_async_playwright),
         ):
             profile_dir = Path(tmp_dir) / "profile"
             async with open_shared_browser(
@@ -1792,7 +1792,7 @@ class TestRichBatchReporterFormat(unittest.IsolatedAsyncioTestCase):
 
         with (
             tempfile.TemporaryDirectory() as tmp_dir,
-            patch("scrape.scrape.async_playwright", side_effect=fake_async_playwright),
+            patch("scrape.main.async_playwright", side_effect=fake_async_playwright),
         ):
             profile_dir = Path(tmp_dir) / "custom_profile"
             custom_browser = config.BrowserConfig(
