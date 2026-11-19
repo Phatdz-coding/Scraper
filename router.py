@@ -16,6 +16,7 @@ import config
 import ggdoc_scraper
 import pdf_scraper
 import image_scraper
+import scribd_scraper as scribd_module
 from template_info import Template
 from tracker import (
     get_active_output_dir,
@@ -46,37 +47,62 @@ async def start_scraping(
     page_factory: Callable[[], Awaitable[Page]] | None = None,
     template_factory: Callable[..., Awaitable[Template]] | None = None,
 ) -> Path:
-    """
-    base on the template's info and the config.py
-    the scraping initializations are as follow:
+    """Route and execute document scraping based on template metadata and configuration.
 
-    1/ if the website_type is WebsiteType.GOOGLE_DRIVE
-    and the document_type is DocumentType.PDF
-    then call the function direct_download first
-    if the function return status code != 200, typically 400 or 404 --> it is the view-only document
-    then call the function scrape_inpage_by_api()
+    The scraping workflow follows a two-phase architecture:
 
-    2/
-    2.1/if the website type is WebsiteType.GOOGLE_DOC
-    and the document_type is DocumentType.GOOGLE_DOC
-    then try to call the direct_download() function
-    if the function return status_code != 200, typically 400 or 404 --> it is the view-only document
-    then call the function scrape_inpage_by_api(), open the new url in the current page and pass it to the function
-    2.2/ if the website type is WebsiteType.GOOGLE_DOC
-    and the document_type is DocumentType.MICROSOFT_WORD
-    then try to call the direct_download() function
-    if the function return status_code != 200, typically 400 or 404 --> it is the view-only document
-    keep the current page and call scrape_inpage_by_script()
+    1. **Phase 1: Direct Download (when ``scrape_type != "s"``)**
+       Attempts an HTTP direct download first without requiring or launching a browser
+       page. If successful (HTTP 200), the downloaded file path is returned immediately.
+       If the request fails with a 4xx client error (typically indicating export/download
+       restrictions or a view-only document), execution falls through to Phase 2.
+       When ``scrape_type == "s"`` (viewer scraper mode), this phase is skipped entirely.
 
-    3/ if the website type is WebsiteType.SCRIBD
-    design a pseudocode
-    because i don't have the unique scraper for this type of website
+    2. **Phase 2: In-Page / Viewer Scraping (Lazy Browser Initialization)**
+       Lazily initializes or acquires the Playwright ``Page`` (via ``page`` or
+       ``page_factory``). If the ``DocumentType`` is unresolved (``None``, ``UNKNOWN``,
+       or ``SHORTCUT``), it is dynamically resolved from the DOM (using ``template_factory``
+       or ``Template.create``). Document title is resolved from page content, then routed
+       based on ``WebsiteType`` and ``DocumentType``:
 
-    If config.SCRAPE_TYPE is "s", skip direct downloads and use the viewer
-    scraper. Otherwise ("d"), try HTTP direct download first without any browser
-    page; only when it fails (4xx / view-only) is the page lazily opened (via
-    ``page`` or ``page_factory``) and, only if the document type is missing or
-    unresolved, the DocumentType is detected from the DOM before routing.
+       - **WebsiteType.GOOGLE_DRIVE**:
+         - ``DocumentType.PDF`` / ``DocumentType.PPTX``:
+           Tries ``pdf_scraper.direct_download``; falls back to ``pdf_scraper.scrape_inpage_by_api``.
+         - ``DocumentType.IMAGE``:
+           Tries ``pdf_scraper.direct_download``; falls back to ``image_scraper.scrape_inpage_by_api``.
+         - ``DocumentType.MICROSOFT_WORD``:
+           Tries ``ggdoc_scraper.direct_download`` (.docx); falls back to ``ggdoc_scraper.scrape_inpage_by_script``.
+         - ``DocumentType.GOOGLE_DOC``:
+           Tries ``ggdoc_scraper.direct_download`` (.docx); falls back to ``ggdoc_scraper.scrape_inpage_by_api``.
+
+       - **WebsiteType.GOOGLE_DOC**:
+         - ``DocumentType.GOOGLE_DOC``:
+           Tries ``ggdoc_scraper.direct_download`` (.docx); falls back to ``ggdoc_scraper.scrape_inpage_by_api``.
+         - ``DocumentType.MICROSOFT_WORD``:
+           Tries ``ggdoc_scraper.direct_download`` (.docx); falls back to ``ggdoc_scraper.scrape_inpage_by_script``.
+
+       - **WebsiteType.SCRIBD**:
+         - Executes ``scribd_scraper`` if provided, otherwise defaults to
+           ``scribd_scraper.scrape_inpage(active_page, document_name)``.
+
+    Args:
+        page: Optional active Playwright ``Page``. If ``None``, lazily created via ``page_factory``.
+        template_info: ``Template`` metadata object containing URL, website type, document type, and file ID.
+        scribd_scraper: Optional override callback for scraping Scribd documents.
+            Defaults to ``scribd_scraper.scrape_inpage``.
+        output_dir: Target directory where output files are stored (defaults to active output dir or config).
+        scrape_type: Scraping strategy: ``"d"`` (direct download first, fallback to viewer) or ``"s"`` (viewer only).
+        page_factory: Async factory callable to create a Playwright ``Page`` on demand.
+        template_factory: Optional async factory callable to re-resolve ``Template`` metadata from DOM.
+
+    Returns:
+        Path: Path to the downloaded or scraped output file.
+
+    Raises:
+        ValueError: If file ID is missing for Google Drive or Google Docs.
+        NotImplementedError: If the website or document type is unsupported.
+        RuntimeError: If direct download fails with an unexpected HTTP status, or if browser page
+            creation fails.
     """
     if (
         template_info.fileID is None
@@ -105,17 +131,36 @@ async def start_scraping(
         active_page = await _ensure_page()
         return await template_info.get_file_name(await active_page.content())
 
+    async def _invoke_inpage_scraper(
+        scraper_fn: Callable[..., Path | Awaitable[Path]],
+        target_page: Page,
+        target_name: str,
+    ) -> Path:
+        if active_output_dir is not None:
+            try:
+                sig = inspect.signature(scraper_fn)
+                if "output_dir" in sig.parameters:
+                    res = scraper_fn(
+                        target_page, target_name, output_dir=active_output_dir
+                    )
+                else:
+                    res = scraper_fn(target_page, target_name)
+            except (ValueError, TypeError):
+                res = scraper_fn(target_page, target_name)
+        else:
+            res = scraper_fn(target_page, target_name)
+
+        if inspect.isawaitable(res):
+            return await res
+        return res
+
     if template_info.website_type == WebsiteType.SCRIBD:
         active_page = await _ensure_page()
         document_name = await _resolve_document_name()
-        if scribd_scraper is None:
-            raise NotImplementedError(
-                "Scribd scraping is not implemented; provide scribd_scraper"
-            )
-        result = scribd_scraper(active_page, document_name)
-        if inspect.isawaitable(result):
-            return await result
-        return result
+        active_scribd_scraper = scribd_scraper or scribd_module.scrape_inpage
+        return await _invoke_inpage_scraper(
+            active_scribd_scraper, active_page, document_name
+        )
 
     if file_id is None:
         raise ValueError("A file ID is required for Google Drive and Google Docs")
@@ -177,21 +222,8 @@ async def start_scraping(
     async def _call_inpage_scraper(
         scraper_fn: Callable[..., Path | Awaitable[Path]],
     ) -> Path:
-        if active_output_dir is not None:
-            try:
-                sig = inspect.signature(scraper_fn)
-                if "output_dir" in sig.parameters:
-                    res = scraper_fn(page, document_name, output_dir=active_output_dir)
-                else:
-                    res = scraper_fn(page, document_name)
-            except (ValueError, TypeError):
-                res = scraper_fn(page, document_name)
-        else:
-            res = scraper_fn(page, document_name)
-
-        if inspect.isawaitable(res):
-            return await res
-        return res
+        assert page is not None
+        return await _invoke_inpage_scraper(scraper_fn, page, document_name)
 
     # ---- Phase 1 (-t d): HTTP direct download first, no browser needed ----
     if active_scrape_type != "s":
