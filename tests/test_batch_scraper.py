@@ -1821,6 +1821,154 @@ class TestRichBatchReporterFormat(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(call_kwargs["locale"], "vi-VN")
                 fake_persistent_ctx.add_init_script.assert_not_awaited()
 
+    async def test_open_shared_browser_falls_back_chrome_to_edge_to_chromium(self) -> None:
+        from playwright.async_api import Error as PlaywrightError
+
+        for succeed_on, expected_channels in [
+            ("chrome", ["chrome"]),
+            ("msedge", ["chrome", "msedge"]),
+            ("chromium", ["chrome", "msedge", "chromium"]),
+            (None, ["chrome", "msedge", "chromium", None]),
+        ]:
+            with self.subTest(succeed_on=succeed_on):
+                fake_persistent_ctx = FakeAsyncContext(accept_downloads=True)
+                fake_persistent_ctx.add_init_script = AsyncMock()  # type: ignore[attr-defined]
+                attempted_channels: list[str | None] = []
+
+                async def fake_launch_persistent(**kwargs):
+                    channel = kwargs.get("channel")
+                    attempted_channels.append(channel)
+                    if channel == succeed_on:
+                        return fake_persistent_ctx
+                    raise PlaywrightError(
+                        f"Chromium distribution {channel!r} is not found"
+                    )
+
+                fake_chromium = MagicMock()
+                fake_chromium.launch_persistent_context = AsyncMock(
+                    side_effect=fake_launch_persistent
+                )
+                fake_pw = MagicMock()
+                fake_pw.chromium = fake_chromium
+
+                @asynccontextmanager
+                async def fake_async_playwright():
+                    yield fake_pw
+
+                with (
+                    tempfile.TemporaryDirectory() as tmp_dir,
+                    patch(
+                        "scrape.main.async_playwright",
+                        side_effect=fake_async_playwright,
+                    ),
+                ):
+                    async with open_shared_browser(
+                        headless=True, user_data_dir=Path(tmp_dir) / "profile"
+                    ) as shared_ctx:
+                        self.assertIs(shared_ctx, fake_persistent_ctx)
+
+                self.assertEqual(attempted_channels, expected_channels)
+                self.assertTrue(fake_persistent_ctx.closed)
+
+    async def test_open_shared_browser_clean_mode_falls_back_chrome_to_edge_to_chromium(self) -> None:
+        from playwright.async_api import Error as PlaywrightError
+
+        fake_context = FakeAsyncContext(accept_downloads=True)
+        fake_browser = MagicMock()
+        fake_browser.new_context = AsyncMock(return_value=fake_context)
+        fake_browser.close = AsyncMock()
+
+        attempted_channels: list[str | None] = []
+
+        async def fake_launch(**kwargs):
+            channel = kwargs.get("channel")
+            attempted_channels.append(channel)
+            if channel is None:
+                return fake_browser
+            raise PlaywrightError(f"Chromium distribution {channel!r} is not found")
+
+        fake_chromium = MagicMock()
+        fake_chromium.launch = AsyncMock(side_effect=fake_launch)
+        fake_pw = MagicMock()
+        fake_pw.chromium = fake_chromium
+
+        @asynccontextmanager
+        async def fake_async_playwright():
+            yield fake_pw
+
+        with patch("scrape.main.async_playwright", side_effect=fake_async_playwright):
+            async with open_shared_browser(headless=False, clean=True) as shared_ctx:
+                self.assertIs(shared_ctx, fake_context)
+
+        self.assertEqual(attempted_channels, ["chrome", "msedge", None])
+        fake_browser.new_context.assert_awaited_once_with(
+            accept_downloads=config.BROWSER_ACCEPT_DOWNLOADS
+        )
+        self.assertTrue(fake_context.closed)
+        fake_browser.close.assert_awaited_once()
+
+    async def test_open_shared_browser_respects_explicit_channel_and_reports_all_failures(self) -> None:
+        from playwright.async_api import Error as PlaywrightError
+
+        attempted_channels: list[str | None] = []
+
+        async def always_fail(**kwargs):
+            channel = kwargs.get("channel")
+            attempted_channels.append(channel)
+            raise PlaywrightError(f"Missing browser for {channel!r}")
+
+        fake_chromium = MagicMock()
+        fake_chromium.launch_persistent_context = AsyncMock(side_effect=always_fail)
+        fake_pw = MagicMock()
+        fake_pw.chromium = fake_chromium
+
+        @asynccontextmanager
+        async def fake_async_playwright():
+            yield fake_pw
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            patch("scrape.main.async_playwright", side_effect=fake_async_playwright),
+        ):
+            custom_browser = config.BrowserConfig(
+                user_data_dir=Path(tmp_dir) / "profile",
+                channel="msedge",
+            )
+            with self.assertRaises(RuntimeError) as ctx:
+                async with open_shared_browser(browser_config=custom_browser):
+                    pass
+
+        self.assertEqual(attempted_channels, ["msedge", "chrome", "chromium", None])
+        error_text = str(ctx.exception)
+        self.assertIn("msedge", error_text)
+        self.assertIn("chrome", error_text)
+        self.assertIn("chromium", error_text)
+        self.assertIn("playwright install chromium", error_text)
+
+    async def test_open_shared_browser_propagates_unexpected_non_launch_errors(self) -> None:
+        fake_chromium = MagicMock()
+        fake_chromium.launch_persistent_context = AsyncMock(
+            side_effect=ValueError("invalid option")
+        )
+        fake_pw = MagicMock()
+        fake_pw.chromium = fake_chromium
+
+        @asynccontextmanager
+        async def fake_async_playwright():
+            yield fake_pw
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            patch("scrape.main.async_playwright", side_effect=fake_async_playwright),
+        ):
+            with self.assertRaises(ValueError):
+                async with open_shared_browser(
+                    user_data_dir=Path(tmp_dir) / "profile"
+                ):
+                    pass
+
+        fake_chromium.launch_persistent_context.assert_awaited_once()
+
 
 class TestConfigSeparation(unittest.IsolatedAsyncioTestCase):
     def test_batch_and_browser_config_live_in_config_and_reexport_in_scrape(self) -> None:

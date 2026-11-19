@@ -12,9 +12,10 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 import inspect
+import logging
 from pathlib import Path
 import sys
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, TypeVar, runtime_checkable
 from urllib.parse import urlparse
 
 if __package__ in (None, ""):
@@ -23,6 +24,7 @@ if __package__ in (None, ""):
 from playwright.async_api import (
     Browser as AsyncBrowser,
     BrowserContext as AsyncBrowserContext,
+    Error as PlaywrightError,
     Page as AsyncPage,
     async_playwright,
 )
@@ -61,6 +63,8 @@ from scrape.tracker import (
 )
 
 console = Console()
+logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
 
 
 # ---------------------------------------------------------------------------
@@ -634,6 +638,79 @@ class RichBatchReporter:
 # ---------------------------------------------------------------------------
 # Shared Browser Factory (Persistent Context + Anti-Bot Stealth)
 # ---------------------------------------------------------------------------
+def _resolve_browser_channels(
+    configured_channel: str | None,
+    *,
+    clean: bool,
+) -> tuple[str | None, ...]:
+    """Build the ordered, deduplicated Playwright channel fallback chain.
+
+    Tries system Google Chrome (``"chrome"``) first, then system Microsoft Edge
+    (``"msedge"``), and finally falls back to Playwright's bundled Chromium.
+    If ``configured_channel`` explicitly requests another channel (e.g.,
+    ``"chrome-beta"`` or ``"msedge"``), it is tried first before falling back.
+    """
+    candidates: list[str | None] = []
+    if configured_channel not in (None, "chromium"):
+        candidates.append(configured_channel)
+
+    for channel in config.BROWSER_CHANNEL_FALLBACKS:
+        if channel == "chromium" and (clean or configured_channel is None):
+            continue
+        candidates.append(channel)
+
+    candidates.append(None)
+
+    deduped: list[str | None] = []
+    for channel in candidates:
+        if channel not in deduped:
+            deduped.append(channel)
+    return tuple(deduped)
+
+
+def _format_launch_error(exc: Exception) -> str:
+    """Return a concise single-line summary for a browser launch failure."""
+    message = str(exc).strip()
+    if not message:
+        return type(exc).__name__
+    return message.splitlines()[0]
+
+
+async def _launch_with_channel_fallback(
+    launcher: Callable[..., Awaitable[_T]],
+    base_kwargs: dict[str, Any],
+    channels: Sequence[str | None],
+) -> _T:
+    """Try launching Playwright across candidate channels until one succeeds."""
+    failures: list[tuple[str, Exception]] = []
+    for channel in channels:
+        launch_kwargs = (
+            {**base_kwargs, "channel": channel}
+            if channel is not None
+            else dict(base_kwargs)
+        )
+        try:
+            return await launcher(**launch_kwargs)
+        except (PlaywrightError, OSError) as exc:
+            label = channel if channel is not None else "chromium (bundled)"
+            failures.append((label, exc))
+            logger.debug(
+                "Browser launch failed for channel %r: %s",
+                label,
+                _format_launch_error(exc),
+            )
+
+    details = "\n".join(
+        f"- {label}: {_format_launch_error(exc)}" for label, exc in failures
+    )
+    last_error = failures[-1][1] if failures else None
+    raise RuntimeError(
+        "Failed to launch any supported Chromium-based browser.\n"
+        f"Tried channels:\n{details}\n"
+        "Install Google Chrome, Microsoft Edge, or run 'playwright install chromium'."
+    ) from last_error
+
+
 @asynccontextmanager
 async def open_shared_browser(
     headless: bool | None = None,
@@ -642,7 +719,11 @@ async def open_shared_browser(
     browser_config: BrowserConfig | None = None,
     clean: bool = False,
 ) -> AsyncGenerator[AsyncBrowser | AsyncBrowserContext, None]:
-    """Launch a shared Chromium browser.
+    """Launch a shared Chromium-based browser with Chrome -> Edge -> Chromium fallback.
+
+    Tries system Google Chrome (``"chrome"``) first, then system Microsoft Edge
+    (``"msedge"``), and falls back to Playwright's bundled Chromium when neither
+    system browser is available.
 
     When ``clean=False`` (default), opens a persistent ``BrowserContext`` with
     the configured profile directory and anti-bot stealth settings.
@@ -657,11 +738,14 @@ async def open_shared_browser(
         headless=headless,
         user_data_dir=user_data_dir,
     )
+    channels = _resolve_browser_channels(effective_config.channel, clean=clean)
 
     async with async_playwright() as playwright:
         if clean:
-            browser = await playwright.chromium.launch(
-                headless=effective_config.headless
+            browser = await _launch_with_channel_fallback(
+                playwright.chromium.launch,
+                {"headless": effective_config.headless},
+                channels,
             )
             context: AsyncBrowserContext | None = None
             try:
@@ -675,8 +759,12 @@ async def open_shared_browser(
             return
 
         effective_config.user_data_dir.mkdir(parents=True, exist_ok=True)
-        context = await playwright.chromium.launch_persistent_context(
-            **effective_config.to_persistent_context_kwargs()
+        persistent_kwargs = effective_config.to_persistent_context_kwargs()
+        persistent_kwargs.pop("channel", None)
+        context = await _launch_with_channel_fallback(
+            playwright.chromium.launch_persistent_context,
+            persistent_kwargs,
+            channels,
         )
         try:
             if effective_config.stealth_init_script:

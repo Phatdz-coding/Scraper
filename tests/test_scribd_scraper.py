@@ -438,8 +438,10 @@ class TestBatchScraperScribdHeadedExecution(unittest.IsolatedAsyncioTestCase):
             result = await orchestrator.run(links)
 
         self.assertEqual(result.succeeded_count, 5)
-        # Exactly 1 browser launch and 1 fresh BrowserContext for all 5 Scribd links.
-        fake_playwright.chromium.launch.assert_awaited_once_with(headless=False)
+        # Exactly 1 browser launch (trying system Chrome first) and 1 fresh BrowserContext for all 5 Scribd links.
+        fake_playwright.chromium.launch.assert_awaited_once_with(
+            headless=False, channel="chrome"
+        )
         fake_browser.new_context.assert_awaited_once_with(
             accept_downloads=config.BROWSER_ACCEPT_DOWNLOADS
         )

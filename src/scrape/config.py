@@ -68,6 +68,7 @@ GOOGLE_DRIVE_API_RATE_PERIOD_SECONDS = 60
 # ---------------------------------------------------------------------------
 BROWSER_HEADLESS: bool = True
 BROWSER_CHANNEL: str | None = "chromium"
+BROWSER_CHANNEL_FALLBACKS: tuple[str | None, ...] = ("chrome", "msedge", "chromium")
 BROWSER_ACCEPT_DOWNLOADS: bool = True
 BROWSER_LOCALE: str = "en-US"
 BROWSER_VIEWPORT: dict[str, int] = {"width": 1920, "height": 1080}
