@@ -1030,8 +1030,45 @@ class TestAsyncScraperModules(unittest.IsolatedAsyncioTestCase):
 # CLI Integration Unit Tests (typer.testing.CliRunner)
 # ---------------------------------------------------------------------------
 class TestBatchScraperCLI(unittest.TestCase):
+    _CONFIG_ATTRS = (
+        "BROWSER_HEADLESS",
+        "USE_GOOGLE_DRIVE_API",
+        "GOOGLE_API_KEY",
+        "MAX_CONCURENT_FOLDER_NODE_VISIT",
+        "FOLDER_TIMEOUT",
+        "MAX_FOLDER_DEPTH",
+        "SCRAPE_RETRY_COUNT",
+        "MAX_CONCURRENT_IMG_API",
+    )
+
     def setUp(self) -> None:
         self.runner = CliRunner()
+        self._saved_config = {
+            attr: getattr(config, attr) for attr in self._CONFIG_ATTRS
+        }
+
+    def tearDown(self) -> None:
+        for attr, value in self._saved_config.items():
+            setattr(config, attr, value)
+
+    @staticmethod
+    def _make_success_result(url: str, out_dir: Path) -> BatchScrapeResult:
+        link = ClassifiedLink(
+            url=url,
+            website_type=WebsiteType.GOOGLE_DRIVE,
+            document_type=DocumentType.PDF,
+        )
+        return BatchScrapeResult(
+            raw_urls=[url],
+            classified_links=[link],
+            results=[
+                ScrapeItemResult(
+                    link=link,
+                    output_path=out_dir / "doc.pdf",
+                    error=None,
+                )
+            ],
+        )
 
     def test_cli_flags_passed_to_batch_config_and_exits_zero_on_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1155,6 +1192,278 @@ class TestBatchScraperCLI(unittest.TestCase):
                 app, [str(Path(tmp_dir) / "nonexistent.txt")]
             )
             self.assertEqual(missing_file_res.exit_code, 1)
+
+    def test_cli_new_options_long_and_short_flags_update_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            txt_file = Path(tmp_dir) / "urls.txt"
+            out_dir = Path(tmp_dir) / "out"
+            url = "https://drive.google.com/file/d/123/view"
+            txt_file.write_text(url + "\n", encoding="utf-8")
+            fake_result = self._make_success_result(url, out_dir)
+
+            captured_configs: list[BatchConfig] = []
+
+            async def fake_run(
+                scraper_self: BatchScraper, source: Path, **kwargs: object
+            ) -> BatchScrapeResult:
+                captured_configs.append(scraper_self.config)
+                return fake_result
+
+            # Long flags
+            config.BROWSER_HEADLESS = True
+            config.USE_GOOGLE_DRIVE_API = False
+            config.GOOGLE_API_KEY = "OLD_KEY"
+            with patch.object(BatchScraper, "run", new=fake_run):
+                res_long = self.runner.invoke(
+                    app,
+                    [
+                        str(txt_file),
+                        "--headless-disable",
+                        "--use-gg-api",
+                        "LONG_API_KEY",
+                        "--concurrent-folder",
+                        "4",
+                        "--folder-timeout",
+                        "25",
+                        "--max-folder-depth",
+                        "12",
+                        "--max-retry",
+                        "7",
+                        "--max-concurrent-img-api",
+                        "15",
+                    ],
+                )
+
+            self.assertEqual(res_long.exit_code, 0, msg=res_long.output)
+            self.assertFalse(config.BROWSER_HEADLESS)
+            self.assertFalse(captured_configs[-1].headless)
+            self.assertFalse(captured_configs[-1].browser.headless)
+            self.assertTrue(config.USE_GOOGLE_DRIVE_API)
+            self.assertEqual(config.GOOGLE_API_KEY, "LONG_API_KEY")
+            self.assertEqual(config.MAX_CONCURENT_FOLDER_NODE_VISIT, 4)
+            self.assertEqual(config.FOLDER_TIMEOUT, 25)
+            self.assertEqual(config.MAX_FOLDER_DEPTH, 12)
+            self.assertEqual(config.SCRAPE_RETRY_COUNT, 7)
+            self.assertEqual(config.MAX_CONCURRENT_IMG_API, 15)
+
+            # Short flags at boundary values
+            config.BROWSER_HEADLESS = True
+            config.USE_GOOGLE_DRIVE_API = False
+            config.GOOGLE_API_KEY = "OLD_KEY"
+            with patch.object(BatchScraper, "run", new=fake_run):
+                res_short = self.runner.invoke(
+                    app,
+                    [
+                        str(txt_file),
+                        "-hd",
+                        "-ugga",
+                        "SHORT_API_KEY",
+                        "-cf",
+                        "1",
+                        "-ft",
+                        "1",
+                        "-mfd",
+                        "100",
+                        "-mr",
+                        "0",
+                        "-mcia",
+                        "30",
+                    ],
+                )
+
+            self.assertEqual(res_short.exit_code, 0, msg=res_short.output)
+            self.assertFalse(config.BROWSER_HEADLESS)
+            self.assertFalse(captured_configs[-1].headless)
+            self.assertTrue(config.USE_GOOGLE_DRIVE_API)
+            self.assertEqual(config.GOOGLE_API_KEY, "SHORT_API_KEY")
+            self.assertEqual(config.MAX_CONCURENT_FOLDER_NODE_VISIT, 1)
+            self.assertEqual(config.FOLDER_TIMEOUT, 1)
+            self.assertEqual(config.MAX_FOLDER_DEPTH, 100)
+            self.assertEqual(config.SCRAPE_RETRY_COUNT, 0)
+            self.assertEqual(config.MAX_CONCURRENT_IMG_API, 30)
+
+    def test_cli_use_gg_api_optional_key_parsing_variants(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            txt_file = Path(tmp_dir) / "urls.txt"
+            out_dir = Path(tmp_dir) / "out"
+            url = "https://drive.google.com/file/d/123/view"
+            txt_file.write_text(url + "\n", encoding="utf-8")
+            fake_result = self._make_success_result(url, out_dir)
+
+            captured_sources: list[Path] = []
+
+            async def fake_run(
+                scraper_self: BatchScraper, source: Path, **kwargs: object
+            ) -> BatchScrapeResult:
+                captured_sources.append(source)
+                return fake_result
+
+            # Variants without an API key: enable flag only, keep existing GOOGLE_API_KEY
+            no_key_cases = [
+                [str(txt_file), "--use-gg-api"],
+                ["--use-gg-api", str(txt_file)],
+                [str(txt_file), "-ugga"],
+                ["-ugga", str(txt_file)],
+                ["-ugga", "-hd", str(txt_file)],
+                [str(txt_file), "--use-gg-api", "-hd"],
+                ["-c", "3", "--use-gg-api", str(txt_file)],
+                ["--use-gg-api=", str(txt_file)],
+            ]
+            for argv in no_key_cases:
+                with self.subTest(no_key_argv=argv):
+                    config.USE_GOOGLE_DRIVE_API = False
+                    config.GOOGLE_API_KEY = "ENV_KEY_UNCHANGED"
+                    config.BROWSER_HEADLESS = True
+                    captured_sources.clear()
+                    with patch.object(BatchScraper, "run", new=fake_run):
+                        res = self.runner.invoke(app, argv)
+                    self.assertEqual(res.exit_code, 0, msg=f"{argv}: {res.output}")
+                    self.assertTrue(config.USE_GOOGLE_DRIVE_API)
+                    self.assertEqual(config.GOOGLE_API_KEY, "ENV_KEY_UNCHANGED")
+                    self.assertEqual(captured_sources, [txt_file])
+
+            # Variants with an API key: enable flag AND update GOOGLE_API_KEY
+            with_key_cases = [
+                ([str(txt_file), "--use-gg-api", "KEY_1"], "KEY_1"),
+                (["--use-gg-api", "KEY_2", str(txt_file)], "KEY_2"),
+                (["--use-gg-api=KEY_3", str(txt_file)], "KEY_3"),
+                (["-ugga=KEY_4", str(txt_file)], "KEY_4"),
+                (["-ugga", "KEY_5", str(txt_file)], "KEY_5"),
+                (["-c", "3", "-ugga", "KEY_6", str(txt_file)], "KEY_6"),
+                ([str(txt_file), "-ugga", "KEY_7", "-hd"], "KEY_7"),
+            ]
+            for argv, expected_key in with_key_cases:
+                with self.subTest(with_key_argv=argv):
+                    config.USE_GOOGLE_DRIVE_API = False
+                    config.GOOGLE_API_KEY = "ENV_KEY_OLD"
+                    config.BROWSER_HEADLESS = True
+                    captured_sources.clear()
+                    with patch.object(BatchScraper, "run", new=fake_run):
+                        res = self.runner.invoke(app, argv)
+                    self.assertEqual(res.exit_code, 0, msg=f"{argv}: {res.output}")
+                    self.assertTrue(config.USE_GOOGLE_DRIVE_API)
+                    self.assertEqual(config.GOOGLE_API_KEY, expected_key)
+                    self.assertEqual(captured_sources, [txt_file])
+
+    def test_cli_omitting_new_options_preserves_existing_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            txt_file = Path(tmp_dir) / "urls.txt"
+            out_dir = Path(tmp_dir) / "out"
+            url = "https://drive.google.com/file/d/123/view"
+            txt_file.write_text(url + "\n", encoding="utf-8")
+            fake_result = self._make_success_result(url, out_dir)
+
+            config.BROWSER_HEADLESS = True
+            config.USE_GOOGLE_DRIVE_API = False
+            config.GOOGLE_API_KEY = "KEEP_ME"
+            config.MAX_CONCURENT_FOLDER_NODE_VISIT = 7
+            config.FOLDER_TIMEOUT = 18
+            config.MAX_FOLDER_DEPTH = 9
+            config.SCRAPE_RETRY_COUNT = 4
+            config.MAX_CONCURRENT_IMG_API = 11
+
+            async def fake_run(
+                scraper_self: BatchScraper, source: Path, **kwargs: object
+            ) -> BatchScrapeResult:
+                return fake_result
+
+            with patch.object(BatchScraper, "run", new=fake_run):
+                res = self.runner.invoke(app, [str(txt_file)])
+
+            self.assertEqual(res.exit_code, 0, msg=res.output)
+            self.assertTrue(config.BROWSER_HEADLESS)
+            self.assertFalse(config.USE_GOOGLE_DRIVE_API)
+            self.assertEqual(config.GOOGLE_API_KEY, "KEEP_ME")
+            self.assertEqual(config.MAX_CONCURENT_FOLDER_NODE_VISIT, 7)
+            self.assertEqual(config.FOLDER_TIMEOUT, 18)
+            self.assertEqual(config.MAX_FOLDER_DEPTH, 9)
+            self.assertEqual(config.SCRAPE_RETRY_COUNT, 4)
+            self.assertEqual(config.MAX_CONCURRENT_IMG_API, 11)
+
+    def test_cli_rejects_out_of_range_option_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            txt_file = Path(tmp_dir) / "urls.txt"
+            txt_file.write_text(
+                "https://drive.google.com/file/d/1/view\n", encoding="utf-8"
+            )
+            invalid_cases = [
+                [str(txt_file), "-cf", "0"],
+                [str(txt_file), "-ft", "0"],
+                [str(txt_file), "-mfd", "0"],
+                [str(txt_file), "-mfd", "101"],
+                [str(txt_file), "-mr", "-1"],
+                [str(txt_file), "-mr", "11"],
+                [str(txt_file), "-mcia", "0"],
+                [str(txt_file), "-mcia", "31"],
+            ]
+            for argv in invalid_cases:
+                with self.subTest(invalid_argv=argv):
+                    res = self.runner.invoke(app, argv)
+                    self.assertNotEqual(res.exit_code, 0, msg=f"Expected failure for {argv}")
+
+    def test_cli_help_documents_all_new_options(self) -> None:
+        res = self.runner.invoke(app, ["--help"], env={"COLUMNS": "140"})
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        for token in (
+            "--headless-disable",
+            "-hd",
+            "--use-gg-api",
+            "-ugga",
+            "--concurrent-folder",
+            "-cf",
+            "--folder-timeout",
+            "-ft",
+            "--max-folder-depth",
+            "-mfd",
+            "--max-retry",
+            "-mr",
+            "--max-concurrent-img-api",
+            "-mcia",
+        ):
+            self.assertIn(token, res.output)
+
+    def test_runtime_config_overrides_validation_and_scoped_restore(self) -> None:
+        with self.assertRaises(ValueError):
+            config.RuntimeConfigOverrides(concurrent_folder=0)
+        with self.assertRaises(ValueError):
+            config.RuntimeConfigOverrides(folder_timeout=0)
+        with self.assertRaises(ValueError):
+            config.RuntimeConfigOverrides(max_folder_depth=101)
+        with self.assertRaises(ValueError):
+            config.RuntimeConfigOverrides(max_retry=11)
+        with self.assertRaises(ValueError):
+            config.RuntimeConfigOverrides(max_concurrent_img_api=31)
+        with self.assertRaises(ValueError):
+            config.RuntimeConfigOverrides(max_retry=True)  # type: ignore[arg-type]
+
+        overrides = config.RuntimeConfigOverrides(
+            headless_disable=True,
+            use_google_drive_api=True,
+            google_api_key="   ",
+            folder_timeout=15,
+            max_folder_depth=5,
+        )
+        self.assertIsNone(overrides.google_api_key)
+        self.assertEqual(
+            overrides.to_config_updates(),
+            {
+                "BROWSER_HEADLESS": False,
+                "USE_GOOGLE_DRIVE_API": True,
+                "FOLDER_TIMEOUT": 15,
+                "MAX_FOLDER_DEPTH": 5,
+            },
+        )
+
+        orig_headless = config.BROWSER_HEADLESS
+        orig_timeout = config.FOLDER_TIMEOUT
+        orig_depth = config.MAX_FOLDER_DEPTH
+        with overrides.scoped():
+            self.assertFalse(config.BROWSER_HEADLESS)
+            self.assertEqual(config.FOLDER_TIMEOUT, 15)
+            self.assertEqual(config.MAX_FOLDER_DEPTH, 5)
+        self.assertEqual(config.BROWSER_HEADLESS, orig_headless)
+        self.assertEqual(config.FOLDER_TIMEOUT, orig_timeout)
+        self.assertEqual(config.MAX_FOLDER_DEPTH, orig_depth)
 
 
 class TestRichBatchReporterFormat(unittest.IsolatedAsyncioTestCase):

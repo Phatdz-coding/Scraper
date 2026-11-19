@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 import os
 from pathlib import Path
+import sys
 from typing import Any
 
 
@@ -42,13 +45,12 @@ _load_dotenv()
 OUTPUT_DIR = "output"  # relative path
 USER_DATA_DIR = ".browser_profile"  # persistent Chromium user data directory
 CONCURRENT_SCRAPER = 5  # maximum number of concurrent document scrapers sharing one browser
-FOLDER_MAX_DEPTH = 2
-API_CONCURRENCY = 20  # maximum number of viewer image requests per batch
+MAX_FOLDER_DEPTH = 2
+MAX_CONCURRENT_IMG_API = 20  # maximum number of viewer image requests per batch
 SCRAPE_TYPE = "d"  # "s": screenshot, "d": try to download directly
 VALID_SCRAPE_TYPES: frozenset[str] = frozenset({"d", "s"})
-MAX_CONCURENT_FOLDER_EXPLORER=5
 MAX_CONCURENT_FOLDER_NODE_VISIT=10 # determine the maximum number of folder to be visited and scraped in DriveFolderScraper.queue
-SCRAPE_TIMEOUT_SECONDS = 10
+FOLDER_TIMEOUT = 10 # max time to wait when open a folder. Should be >= MAX_CONCURENT_FOLDER_NODE_VISIT, measured in second
 SCRAPE_RETRY_COUNT = 2
 
 # Google Drive API (folder scraping). Values come from process environment
@@ -381,8 +383,130 @@ class BatchConfig:
         )
 
 
+def _validate_optional_int(
+    value: int | None,
+    name: str,
+    *,
+    minimum: int,
+    maximum: int | None = None,
+) -> int | None:
+    """Validate an optional integer override against inclusive bounds."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer, not bool")
+    resolved = int(value)
+    if resolved < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {resolved}")
+    if maximum is not None and resolved > maximum:
+        raise ValueError(f"{name} must be <= {maximum}, got {resolved}")
+    return resolved
+
+
+@dataclass(frozen=True)
+class RuntimeConfigOverrides:
+    """Immutable bundle of CLI/runtime overrides applied to module-level config settings."""
+
+    headless_disable: bool = False
+    use_google_drive_api: bool = False
+    google_api_key: str | None = None
+    concurrent_folder: int | None = None
+    folder_timeout: int | None = None
+    max_folder_depth: int | None = None
+    max_retry: int | None = None
+    max_concurrent_img_api: int | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "headless_disable", bool(self.headless_disable))
+        object.__setattr__(
+            self, "use_google_drive_api", bool(self.use_google_drive_api)
+        )
+
+        normalized_key: str | None = None
+        if self.google_api_key is not None:
+            stripped = str(self.google_api_key).strip()
+            normalized_key = stripped or None
+        object.__setattr__(self, "google_api_key", normalized_key)
+
+        object.__setattr__(
+            self,
+            "concurrent_folder",
+            _validate_optional_int(
+                self.concurrent_folder, "concurrent_folder", minimum=1
+            ),
+        )
+        object.__setattr__(
+            self,
+            "folder_timeout",
+            _validate_optional_int(self.folder_timeout, "folder_timeout", minimum=1),
+        )
+        object.__setattr__(
+            self,
+            "max_folder_depth",
+            _validate_optional_int(
+                self.max_folder_depth, "max_folder_depth", minimum=1, maximum=100
+            ),
+        )
+        object.__setattr__(
+            self,
+            "max_retry",
+            _validate_optional_int(self.max_retry, "max_retry", minimum=0, maximum=10),
+        )
+        object.__setattr__(
+            self,
+            "max_concurrent_img_api",
+            _validate_optional_int(
+                self.max_concurrent_img_api,
+                "max_concurrent_img_api",
+                minimum=1,
+                maximum=30,
+            ),
+        )
+
+    def to_config_updates(self) -> dict[str, Any]:
+        """Return the mapping of config module attribute names to overridden values."""
+        updates: dict[str, Any] = {}
+        if self.headless_disable:
+            updates["BROWSER_HEADLESS"] = False
+        if self.use_google_drive_api:
+            updates["USE_GOOGLE_DRIVE_API"] = True
+            if self.google_api_key is not None:
+                updates["GOOGLE_API_KEY"] = self.google_api_key
+        if self.concurrent_folder is not None:
+            updates["MAX_CONCURENT_FOLDER_NODE_VISIT"] = self.concurrent_folder
+        if self.folder_timeout is not None:
+            updates["FOLDER_TIMEOUT"] = self.folder_timeout
+        if self.max_folder_depth is not None:
+            updates["MAX_FOLDER_DEPTH"] = self.max_folder_depth
+        if self.max_retry is not None:
+            updates["SCRAPE_RETRY_COUNT"] = self.max_retry
+        if self.max_concurrent_img_api is not None:
+            updates["MAX_CONCURRENT_IMG_API"] = self.max_concurrent_img_api
+        return updates
+
+    def apply(self, target: Any | None = None) -> None:
+        """Apply all active overrides to ``target`` (defaults to this config module)."""
+        resolved_target = sys.modules[__name__] if target is None else target
+        for attr, value in self.to_config_updates().items():
+            setattr(resolved_target, attr, value)
+
+    @contextmanager
+    def scoped(self, target: Any | None = None) -> Iterator[None]:
+        """Temporarily apply overrides to ``target`` and restore original values on exit."""
+        resolved_target = sys.modules[__name__] if target is None else target
+        updates = self.to_config_updates()
+        previous = {attr: getattr(resolved_target, attr) for attr in updates}
+        for attr, value in updates.items():
+            setattr(resolved_target, attr, value)
+        try:
+            yield
+        finally:
+            for attr, old_value in previous.items():
+                setattr(resolved_target, attr, old_value)
+
+
 # ---------------------------------------------------------------------------
-# Google Drive DOM Icon Vectors
+# Google Drive DOM Icon Vectors & Elements
 # ---------------------------------------------------------------------------
 
 folder_icon_vector="""M20,6h-8l-2-2H4C2.9,4,2.01,4.9,2.01,6L2,18c0,1.1,0.9,2,2,2h16c1.1,0,2-0.9,2-2V8C22,6.9,21.1,6,20,6z M15,9 c1.1,0,2,0.9,2,2c0,1.1-0.9,2-2,2s-2-0.9-2-2C13,9.9,13.9,9,15,9z M19,17h-8v-0.57c0-0.81,0.48-1.53,1.22-1.85 C13.07,14.21,14.01,14,15,14c0.99,0,1.93,0.21,2.78,0.58C18.52,14.9,19,15.62,19,16.43V17z"""

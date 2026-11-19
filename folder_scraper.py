@@ -438,14 +438,15 @@ class FolderScrapeSettings:
     @classmethod
     def from_config(cls) -> FolderScrapeSettings:
         """Build settings from ``config.py`` (falling back to the defaults above)."""
-        timeout_seconds = float(getattr(config, "SCRAPE_TIMEOUT_SECONDS", 15))
+        timeout_seconds = float(getattr(config, "FOLDER_TIMEOUT", 15))
         return cls(
-            timeout_ms=_config_int("SCRAPE_TIMEOUT_SECONDS", default=5, minimum=2) * 1000,
+            timeout_ms=_config_int("FOLDER_TIMEOUT", default=5, minimum=2) * 1000,
             max_retries=_config_int("SCRAPE_RETRY_COUNT", default=2, minimum=0),
-            max_depth=_config_int("FOLDER_MAX_DEPTH", default=5, minimum=0),
+            max_depth=_config_int("MAX_FOLDER_DEPTH", default=5, minimum=0),
             max_concurrency=_config_int(
                 "MAX_CONCURENT_FOLDER_NODE_VISIT", default=2, minimum=1
             ),
+            headless=bool(getattr(config, "BROWSER_HEADLESS", True)),
         )
 
 
@@ -696,7 +697,7 @@ class DriveFolderScraper:
             self.discovered_file_urls.append(classified_link.url)
 
     def _enqueue_folder(self, folder_id: str, depth: int) -> None:
-        """Mark a folder visited and queue it, unless already seen or deeper than FOLDER_MAX_DEPTH."""
+        """Mark a folder visited and queue it, unless already seen or deeper than MAX_FOLDER_DEPTH."""
         if not folder_id or folder_id in self.visited_folder_ids:
             return
         if depth > self.settings.max_depth:
@@ -722,7 +723,7 @@ class DriveFolderScraper:
         self, items: list[dict[str, Any]], current_depth: int
     ) -> list[str]:
         """Classify Drive API file resources, record files and return child folder IDs to explore next."""
-        max_depth = getattr(config, "FOLDER_MAX_DEPTH", 5)
+        max_depth = getattr(config, "MAX_FOLDER_DEPTH", 5)
         next_folder_ids: list[str] = []
 
         for item in items:
@@ -979,7 +980,7 @@ def _api_get_json(
 
     Returns the parsed JSON, or None when the request ultimately fails.
     """
-    timeout_seconds = getattr(config, "SCRAPE_TIMEOUT_SECONDS", 15)
+    timeout_seconds = getattr(config, "FOLDER_TIMEOUT", 15)
     max_retries = getattr(config, "SCRAPE_RETRY_COUNT", 2)
     api_key = str(params.get("key", ""))
 
@@ -1067,7 +1068,7 @@ def _scrape_by_api(folderID:str, api_key:str) -> DriveFolderScraper:
     """Recursively scrape a public Google Drive folder using the Drive v3 REST API.
 
     Traversal is a level-order BFS (same depth semantics as the Playwright
-    scraper, bounded by ``config.FOLDER_MAX_DEPTH``). Performance optimizations:
+    scraper, bounded by ``config.MAX_FOLDER_DEPTH``). Performance optimizations:
 
     * All folders at the same depth level are listed concurrently using
       ``ThreadPoolExecutor`` (``config.MAX_CONCURENT_FOLDER_EXPLORER``).
@@ -1088,7 +1089,7 @@ def _scrape_by_api(folderID:str, api_key:str) -> DriveFolderScraper:
     folderID, api_key = folderID.strip(), api_key.strip()
 
     workers = max(1, int(getattr(config, "MAX_CONCURENT_FOLDER_EXPLORER", 5)))
-    max_depth = getattr(config, "FOLDER_MAX_DEPTH", 5)
+    max_depth = getattr(config, "MAX_FOLDER_DEPTH", 5)
     masked_key = f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) > 8 else "***"
     log_api_scrape_start(
         folderID,
@@ -1173,7 +1174,7 @@ def _scrape_many_by_api(
         return active_scraper
 
     workers = max(1, int(getattr(config, "MAX_CONCURENT_FOLDER_EXPLORER", 5)))
-    max_depth = getattr(config, "FOLDER_MAX_DEPTH", 5)
+    max_depth = getattr(config, "MAX_FOLDER_DEPTH", 5)
     masked_key = f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) > 8 else "***"
     for fid in valid_ids:
         log_api_scrape_start(

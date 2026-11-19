@@ -218,8 +218,8 @@ async def scrape_inpage_by_api(
         except ValueError:
             width = 1600
         images: list[bytes] = []
-        if config.API_CONCURRENCY <= 0:
-            raise ValueError("config.API_CONCURRENCY must be greater than zero")
+        if config.MAX_CONCURRENT_IMG_API <= 0:
+            raise ValueError("config.MAX_CONCURRENT_IMG_API must be greater than zero")
 
         endpoints = []
         for page_number in range(first_page, first_page + total_pages):
@@ -235,9 +235,9 @@ async def scrape_inpage_by_api(
                 "https://drive.google.com/viewer/img?" + urlencode(request_params)
             )
 
-        for batch_start in range(0, len(endpoints), config.API_CONCURRENCY):
+        for batch_start in range(0, len(endpoints), config.MAX_CONCURRENT_IMG_API):
             batch_endpoints = endpoints[
-                batch_start : batch_start + config.API_CONCURRENCY
+                batch_start : batch_start + config.MAX_CONCURRENT_IMG_API
             ]
             responses = await fetch_image_batch(page, batch_endpoints)
             stop_after_batch = False
