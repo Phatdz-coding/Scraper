@@ -18,8 +18,8 @@ from playwright.async_api import (
 )
 from playwright.sync_api import sync_playwright
 
-import config
-from tracker import (
+from scrape import config
+from scrape.tracker import (
     ProgressReporter,
     get_active_output_dir,
     get_active_progress,

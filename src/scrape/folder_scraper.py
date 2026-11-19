@@ -46,10 +46,10 @@ from playwright.sync_api import (
 from rich.console import Console
 import typer
 
-import config
-import classifiers
-from classifiers import ClassifiedLink, DocumentType, DriveElement
-from tracker import record_batch_error
+from scrape import config
+from scrape import classifiers
+from scrape.classifiers import ClassifiedLink, DocumentType, DriveElement
+from scrape.tracker import record_batch_error
 
 console = Console()
 

@@ -9,9 +9,9 @@ from urllib.parse import ParseResult, urlparse
 
 from rich.console import Console
 
-from classifiers.input_parser import InputParser, LinkInputParser
-from classifiers.models import ClassifiedLink, WebsiteType
-from tracker import record_batch_error
+from scrape.classifiers.input_parser import InputParser, LinkInputParser
+from scrape.classifiers.models import ClassifiedLink, WebsiteType
+from scrape.tracker import record_batch_error
 
 console = Console()
 

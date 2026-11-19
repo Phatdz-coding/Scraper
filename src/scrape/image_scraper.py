@@ -8,9 +8,9 @@ from urllib.parse import urlparse
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Page
 
-import config
-from process_images import fetch_image_batch
-from tracker import (
+from scrape import config
+from scrape.process_images import fetch_image_batch
+from scrape.tracker import (
     ProgressReporter,
     get_active_output_dir,
     get_active_progress,

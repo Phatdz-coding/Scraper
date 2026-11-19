@@ -6,9 +6,9 @@ from urllib.parse import urlencode
 
 from playwright.async_api import Download, Error as PlaywrightError, Page
 
-import config
-from template_info import Template
-from tracker import (
+from scrape import config
+from scrape.template_info import Template
+from scrape.tracker import (
     get_active_output_dir,
     release_output_path,
     reserve_output_path,

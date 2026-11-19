@@ -34,7 +34,7 @@ from rich.progress import (
 )
 import typer
 
-from classifiers import (
+from scrape.classifiers import (
     ClassifiedLink,
     DocumentType,
     InputParser,
@@ -42,13 +42,13 @@ from classifiers import (
     LinkInputParser,
     WebsiteType,
 )
-import config
-from config import BatchConfig, BrowserConfig, RuntimeConfigOverrides
-import folder_scraper
-import ggdoc_scraper
-from router import start_scraping
-from template_info import Template
-from tracker import (
+from scrape import config
+from scrape.config import BatchConfig, BrowserConfig, RuntimeConfigOverrides
+from scrape import folder_scraper
+from scrape import ggdoc_scraper
+from scrape.router import start_scraping
+from scrape.template_info import Template
+from scrape.tracker import (
     BatchErrorCollector,
     OutputFilenameResolver,
     batch_error_context,

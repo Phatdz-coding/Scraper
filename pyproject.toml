@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "docscraper"
+version = "0.1.0"
+description = "Document scraper for Google Drive, Google Docs, and Scribd"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "beautifulsoup4",
+    "img2pdf",
+    "playwright",
+    "requests",
+    "rich",
+    "typer",
+    "urllib3",
+]
+
+[project.scripts]
+docscraper = "docscraper.scrape:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+docscraper = ["scripts/*.js"]

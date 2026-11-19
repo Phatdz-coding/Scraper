@@ -7,7 +7,7 @@ from html.parser import HTMLParser
 import re
 from urllib.parse import parse_qs, urlparse
 
-from classifiers import DocumentType, WebsiteType
+from scrape.classifiers import DocumentType, WebsiteType
 
 
 class _TitleParser(HTMLParser):

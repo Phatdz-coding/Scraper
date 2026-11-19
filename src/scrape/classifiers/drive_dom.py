@@ -7,8 +7,8 @@ import xml.etree.ElementTree as ET
 
 from bs4 import BeautifulSoup
 
-import config
-from classifiers.models import ClassifiedLink, DocumentType, DriveElement, WebsiteType
+from scrape import config
+from scrape.classifiers.models import ClassifiedLink, DocumentType, DriveElement, WebsiteType
 
 logger = logging.getLogger(__name__)
 

@@ -11,15 +11,15 @@ from playwright.async_api import Page, async_playwright
 from rich.console import Console
 import typer
 
-from classifiers import DocumentType, WebsiteType
-import config
-import ggdoc_scraper
-import pdf_scraper
-import image_scraper
-import scribd_scraper as scribd_module
-import zip_downloader
-from template_info import Template
-from tracker import (
+from scrape.classifiers import DocumentType, WebsiteType
+from scrape import config
+from scrape import ggdoc_scraper
+from scrape import pdf_scraper
+from scrape import image_scraper
+import scrape.scribd_scraper as scribd_module
+from scrape import zip_downloader
+from scrape.template_info import Template
+from scrape.tracker import (
     get_active_output_dir,
     get_active_scrape_type,
     is_live_progress_enabled,

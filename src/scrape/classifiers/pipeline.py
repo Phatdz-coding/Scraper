@@ -9,10 +9,10 @@ from typing import overload
 from playwright.async_api import Page as AsyncPage
 from playwright.sync_api import Page
 
-from classifiers.models import ClassifiedLink, DocumentType, WebsiteType
-from classifiers.page_doc_classifier import PageDocumentClassifier
-from classifiers.url_doc_classifier import UrlDocumentClassifier
-from classifiers.website_classifier import WebsiteClassifier
+from scrape.classifiers.models import ClassifiedLink, DocumentType, WebsiteType
+from scrape.classifiers.page_doc_classifier import PageDocumentClassifier
+from scrape.classifiers.url_doc_classifier import UrlDocumentClassifier
+from scrape.classifiers.website_classifier import WebsiteClassifier
 
 
 class LinkClassificationPipeline:

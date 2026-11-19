@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from playwright.async_api import Page as AsyncPage
 from playwright.sync_api import Page
 
-from classifiers.models import ClassifiedLink, DocumentType, WebsiteType
+from scrape.classifiers.models import ClassifiedLink, DocumentType, WebsiteType
 
 
 class _TitleParser(HTMLParser):

@@ -1,7 +1,0 @@
-beautifulsoup4
-img2pdf
-playwright
-requests
-rich
-typer
-urllib3

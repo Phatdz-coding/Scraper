@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from classifiers.drive_dom import (
+from scrape.classifiers.drive_dom import (
     _get_icon_data,
     _matches_icon_geometry,
     _matches_icon_structure,
@@ -20,18 +20,18 @@ from classifiers.drive_dom import (
     is_zip_folder,
     matches_vector,
 )
-from classifiers.input_parser import (
+from scrape.classifiers.input_parser import (
     InputParser,
     LinkInputParser,
     parse_links_input,
 )
-from classifiers.models import (
+from scrape.classifiers.models import (
     ClassifiedLink,
     DocumentType,
     DriveElement,
     WebsiteType,
 )
-from classifiers.page_doc_classifier import (
+from scrape.classifiers.page_doc_classifier import (
     GoogleDocPageDocumentStrategy,
     GoogleDrivePageDocumentStrategy,
     PageDocumentClassifier,
@@ -40,8 +40,8 @@ from classifiers.page_doc_classifier import (
     classify_document_by_page,
     classify_document_by_page_async,
 )
-from classifiers.pipeline import LinkClassificationPipeline
-from classifiers.url_doc_classifier import (
+from scrape.classifiers.pipeline import LinkClassificationPipeline
+from scrape.classifiers.url_doc_classifier import (
     GoogleDocUrlDocumentStrategy,
     GoogleDriveUrlDocumentStrategy,
     ScribdUrlDocumentStrategy,
@@ -50,7 +50,7 @@ from classifiers.url_doc_classifier import (
     classify_document_by_url,
     classify_documents_by_url,
 )
-from classifiers.website_classifier import (
+from scrape.classifiers.website_classifier import (
     GoogleDocWebsiteStrategy,
     GoogleDriveWebsiteStrategy,
     ScribdWebsiteStrategy,

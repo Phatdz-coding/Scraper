@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
 from urllib.parse import urlparse
 
-from classifiers.models import ClassifiedLink, DocumentType, WebsiteType
+from scrape.classifiers.models import ClassifiedLink, DocumentType, WebsiteType
 
 
 class UrlDocumentClassifierStrategy(ABC):
