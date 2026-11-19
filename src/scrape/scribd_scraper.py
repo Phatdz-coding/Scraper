@@ -19,6 +19,7 @@ from playwright.async_api import (
 from playwright.sync_api import sync_playwright
 
 from scrape import config
+from scrape.load_script import load as load_script
 from scrape.tracker import (
     ProgressReporter,
     get_active_output_dir,
@@ -58,9 +59,7 @@ ISOLATE_CSS = """
 PAGE_SELECTORS: tuple[str, ...] = (".outer_page", ".page", "div[id^='page_']")
 
 # JavaScript helper functions injected into the page (loaded from scripts/scribd.js)
-INSTALL_JS = (Path(__file__).resolve().parent / "scripts" / "scribd.js").read_text(
-    encoding="utf-8"
-)
+INSTALL_JS = load_script("scribd.js")
 
 
 def _resolve_output_dir(output_dir: Path | str | None = None) -> Path:

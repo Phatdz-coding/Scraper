@@ -680,7 +680,7 @@ class TestLazyPageRouting(unittest.IsolatedAsyncioTestCase):
                 },
                 b"%PDF-1.4",
             )
-            with patch("docscraper.pdf_scraper.urlopen", return_value=response):
+            with patch("scrape.pdf_scraper.urlopen", return_value=response):
                 res = await scraper.scrape_one(link, browser, cfg)  # type: ignore[arg-type]
 
             self.assertTrue(res.succeeded, res.error)
@@ -696,7 +696,7 @@ class TestLazyPageRouting(unittest.IsolatedAsyncioTestCase):
             scraper = PlaywrightAsyncLinkScraper()
             link = ClassifiedLink(url=self.URL, website_type=WebsiteType.GOOGLE_DRIVE)
             response = _FakeHTTPResponse(200, {"Content-Type": "application/pdf"}, b"x")
-            with patch("docscraper.pdf_scraper.urlopen", return_value=response):
+            with patch("scrape.pdf_scraper.urlopen", return_value=response):
                 res = await scraper.scrape_one(link, browser, cfg)  # type: ignore[arg-type]
             self.assertTrue(res.succeeded, res.error)
             self.assertEqual(res.output_path.name, "LAZY_1.pdf")
@@ -736,8 +736,8 @@ class TestLazyPageRouting(unittest.IsolatedAsyncioTestCase):
                     html_resp = _FakeHTTPResponse(200, {"Content-Type": "text/html"}, b"<html>")
                     inpage = AsyncMock(return_value=Path(tmp_dir) / "out.bin")
                     with (
-                        patch("docscraper.pdf_scraper.urlopen", return_value=html_resp),
-                        patch("docscraper.ggdoc_scraper.urlopen",
+                        patch("scrape.pdf_scraper.urlopen", return_value=html_resp),
+                        patch("scrape.ggdoc_scraper.urlopen",
                             side_effect=__import__("urllib.error").error.HTTPError(
                                 self.URL, 404, "nf", {}, None  # type: ignore[arg-type]
                             ),
@@ -774,7 +774,7 @@ class TestLazyPageRouting(unittest.IsolatedAsyncioTestCase):
                     html_resp = _FakeHTTPResponse(200, {"Content-Type": "text/html"}, b"<html>")
                     inpage = AsyncMock(return_value=Path(tmp_dir) / "out.pdf")
                     with (
-                        patch("docscraper.pdf_scraper.urlopen", return_value=html_resp),
+                        patch("scrape.pdf_scraper.urlopen", return_value=html_resp),
                         patch.object(pdf_scraper, "scrape_inpage_by_api", new=inpage),
                     ):
                         res = await scraper.scrape_one(link, browser, cfg)  # type: ignore[arg-type]
@@ -846,7 +846,7 @@ class TestAsyncScraperModules(unittest.IsolatedAsyncioTestCase):
     async def test_process_images_async_helpers(self) -> None:
         page = MagicMock()
         page.evaluate = AsyncMock(return_value="ffd8ffe0")
-        with patch("docscraper.process_images.base64.b64decode", return_value=b"\xff\xd8\xff\xe0"):
+        with patch("scrape.process_images.base64.b64decode", return_value=b"\xff\xd8\xff\xe0"):
             jpeg = await convert_image_to_jpeg(page, b"raw-webp", "image/webp")
         self.assertEqual(jpeg, b"\xff\xd8\xff\xe0")
 
@@ -919,7 +919,7 @@ class TestAsyncScraperModules(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             out_dir = Path(tmp_dir)
             # 1. text/html response (view-only) returns (None, 404) and releases path reservation
-            with patch("docscraper.pdf_scraper.urlopen",
+            with patch("scrape.pdf_scraper.urlopen",
                 return_value=FakeHTTPResponse(200, "text/html; charset=utf-8", b"<html></html>"),
             ):
                 path_html, status_html = await pdf_scraper.direct_download(
@@ -929,7 +929,7 @@ class TestAsyncScraperModules(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status_html, 404)
 
             # 2. Subsequent download of the same name gets the clean 'ViewOnly.pdf' name
-            with patch("docscraper.pdf_scraper.urlopen",
+            with patch("scrape.pdf_scraper.urlopen",
                 return_value=FakeHTTPResponse(200, "application/pdf", b"%PDF-1.4"),
             ):
                 path_pdf, status_pdf = await pdf_scraper.direct_download(
@@ -940,7 +940,7 @@ class TestAsyncScraperModules(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((out_dir / "ViewOnly.pdf").read_bytes(), b"%PDF-1.4")
 
             # 3. ggdoc_scraper.direct_download writes docx via asyncio.to_thread
-            with patch("docscraper.ggdoc_scraper.urlopen",
+            with patch("scrape.ggdoc_scraper.urlopen",
                 return_value=FakeHTTPResponse(
                     200,
                     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -1732,7 +1732,7 @@ class TestRichBatchReporterFormat(unittest.IsolatedAsyncioTestCase):
 
         with (
             tempfile.TemporaryDirectory() as tmp_dir,
-            patch("docscraper.scrape.async_playwright", side_effect=fake_async_playwright),
+            patch("scrape.scrape.async_playwright", side_effect=fake_async_playwright),
         ):
             profile_dir = Path(tmp_dir) / "profile"
             async with open_shared_browser(
@@ -1792,7 +1792,7 @@ class TestRichBatchReporterFormat(unittest.IsolatedAsyncioTestCase):
 
         with (
             tempfile.TemporaryDirectory() as tmp_dir,
-            patch("docscraper.scrape.async_playwright", side_effect=fake_async_playwright),
+            patch("scrape.scrape.async_playwright", side_effect=fake_async_playwright),
         ):
             profile_dir = Path(tmp_dir) / "custom_profile"
             custom_browser = config.BrowserConfig(

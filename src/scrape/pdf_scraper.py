@@ -11,6 +11,7 @@ from playwright.async_api import Browser, ConsoleMessage, Page, async_playwright
 
 from scrape.classifiers import DocumentType
 from scrape import config
+from scrape.load_script import load as load_script
 from scrape.process_images import (
     convert_image_to_jpeg,
     fetch_image_batch,
@@ -27,7 +28,7 @@ from scrape.tracker import (
     scrape_progress,
 )
 
-script = (Path(__file__).parent / "scripts/ggdrive_pdf.js").read_text(encoding="utf-8")
+script = load_script("ggdrive_pdf.js")
 PAGE_SCRAPED_MARKER = "__PDF_SCRAPER_PAGE_SCRAPED__"
 
 

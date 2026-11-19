@@ -180,7 +180,7 @@ class TestBatchScraperScribdHeadedExecution(unittest.IsolatedAsyncioTestCase):
         launcher = BrowserLauncherSpy()
         orchestrator, scraper, reporter = _make_scraper(headless=True)
 
-        with patch("docscraper.scrape.open_shared_browser", launcher):
+        with patch("scrape.scrape.open_shared_browser", launcher):
             result = await orchestrator.run([SCRIBD_1, DRIVE_1, SCRIBD_2, DRIVE_2])
 
         expected_order = [DRIVE_1, DRIVE_2, SCRIBD_1, SCRIBD_2]
@@ -217,7 +217,7 @@ class TestBatchScraperScribdHeadedExecution(unittest.IsolatedAsyncioTestCase):
         launcher = BrowserLauncherSpy()
         orchestrator, scraper, _ = _make_scraper(headless=True)
 
-        with patch("docscraper.scrape.open_shared_browser", launcher):
+        with patch("scrape.scrape.open_shared_browser", launcher):
             result = await orchestrator.run([SCRIBD_1, SCRIBD_2])
 
         self.assertEqual(launcher.headless_calls, [False])
@@ -229,7 +229,7 @@ class TestBatchScraperScribdHeadedExecution(unittest.IsolatedAsyncioTestCase):
         launcher = BrowserLauncherSpy()
         orchestrator, scraper, reporter = _make_scraper(headless=False)
 
-        with patch("docscraper.scrape.open_shared_browser", launcher):
+        with patch("scrape.scrape.open_shared_browser", launcher):
             result = await orchestrator.run([SCRIBD_1, DRIVE_1, SCRIBD_2, DRIVE_2])
 
         self.assertEqual(launcher.headless_calls, [False])
@@ -245,7 +245,7 @@ class TestBatchScraperScribdHeadedExecution(unittest.IsolatedAsyncioTestCase):
         launcher = BrowserLauncherSpy()
         orchestrator, scraper, _ = _make_scraper(headless=True)
 
-        with patch("docscraper.scrape.open_shared_browser", launcher):
+        with patch("scrape.scrape.open_shared_browser", launcher):
             result = await orchestrator.run([DRIVE_1, DRIVE_2])
 
         self.assertEqual(launcher.headless_calls, [True])
@@ -257,7 +257,7 @@ class TestBatchScraperScribdHeadedExecution(unittest.IsolatedAsyncioTestCase):
         expander = FakeFolderExpander(discovered=[])
         orchestrator, scraper, _ = _make_scraper(headless=True, folder_expander=expander)
 
-        with patch("docscraper.scrape.open_shared_browser", launcher):
+        with patch("scrape.scrape.open_shared_browser", launcher):
             result = await orchestrator.run([FOLDER_1, SCRIBD_1])
 
         # Phase 2 needs a headless browser for folders; it is closed before the headed launch.
@@ -275,7 +275,7 @@ class TestBatchScraperScribdHeadedExecution(unittest.IsolatedAsyncioTestCase):
         expander = FakeFolderExpander(discovered=discovered)
         orchestrator, scraper, _ = _make_scraper(headless=True, folder_expander=expander)
 
-        with patch("docscraper.scrape.open_shared_browser", launcher):
+        with patch("scrape.scrape.open_shared_browser", launcher):
             result = await orchestrator.run([SCRIBD_1, FOLDER_1, DRIVE_1])
 
         self.assertEqual(launcher.headless_calls, [True, False])
@@ -290,7 +290,7 @@ class TestBatchScraperScribdHeadedExecution(unittest.IsolatedAsyncioTestCase):
         expander = FakeFolderExpander()
         orchestrator, _, _ = _make_scraper(headless=True, folder_expander=expander)
 
-        with patch("docscraper.scrape.open_shared_browser", launcher):
+        with patch("scrape.scrape.open_shared_browser", launcher):
             await orchestrator.run([SCRIBD_1])
 
         self.assertEqual(expander.browsers, [None])
@@ -310,7 +310,7 @@ class TestBatchScraperScribdHeadedExecution(unittest.IsolatedAsyncioTestCase):
         orchestrator, scraper, reporter = _make_scraper(
             headless=True, browser_factory=fake_factory
         )
-        with patch("docscraper.scrape.open_shared_browser", launcher):
+        with patch("scrape.scrape.open_shared_browser", launcher):
             result = await orchestrator.run([SCRIBD_1, DRIVE_1])
 
         self.assertEqual(launcher.events, [])
@@ -324,7 +324,7 @@ class TestBatchScraperScribdHeadedExecution(unittest.IsolatedAsyncioTestCase):
         external_browser = FakeBrowser(headless=True)
         orchestrator, scraper, _ = _make_scraper(headless=True)
 
-        with patch("docscraper.scrape.open_shared_browser", launcher):
+        with patch("scrape.scrape.open_shared_browser", launcher):
             await orchestrator.run([SCRIBD_1, DRIVE_1], browser=external_browser)
 
         self.assertEqual(launcher.events, [])
@@ -335,7 +335,7 @@ class TestBatchScraperScribdHeadedExecution(unittest.IsolatedAsyncioTestCase):
         launcher = BrowserLauncherSpy(fail_headed=True)
         orchestrator, _, reporter = _make_scraper(headless=True)
 
-        with patch("docscraper.scrape.open_shared_browser", launcher):
+        with patch("scrape.scrape.open_shared_browser", launcher):
             result = await orchestrator.run([SCRIBD_1, DRIVE_1])
 
         self.assertEqual(result.succeeded_count, 1)
@@ -365,7 +365,7 @@ class TestBatchScraperScribdHeadedExecution(unittest.IsolatedAsyncioTestCase):
             return await original_scrape_one(link, browser, cfg)
 
         scraper.scrape_one = probing_scrape_one  # type: ignore[method-assign]
-        with patch("docscraper.scrape.open_shared_browser", launcher), patch("docscraper.scrape.suppress_live_progress", fake_suppress
+        with patch("scrape.scrape.open_shared_browser", launcher), patch("scrape.scrape.suppress_live_progress", fake_suppress
         ):
             await orchestrator.run([SCRIBD_1, DRIVE_1])
 
@@ -434,7 +434,7 @@ class TestBatchScraperScribdHeadedExecution(unittest.IsolatedAsyncioTestCase):
         link_scraper = PlaywrightAsyncLinkScraper(scribd_scraper=fake_scribd_scraper)
         orchestrator = BatchScraper(scraper=link_scraper, config=batch_cfg)
 
-        with patch("docscraper.scrape.async_playwright", fake_async_playwright):
+        with patch("scrape.scrape.async_playwright", fake_async_playwright):
             result = await orchestrator.run(links)
 
         self.assertEqual(result.succeeded_count, 5)
