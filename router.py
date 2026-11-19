@@ -17,6 +17,7 @@ import ggdoc_scraper
 import pdf_scraper
 import image_scraper
 import scribd_scraper as scribd_module
+import zip_downloader
 from template_info import Template
 from tracker import (
     get_active_output_dir,
@@ -74,6 +75,8 @@ async def start_scraping(
            Tries ``ggdoc_scraper.direct_download`` (.docx); falls back to ``ggdoc_scraper.scrape_inpage_by_script``.
          - ``DocumentType.GOOGLE_DOC``:
            Tries ``ggdoc_scraper.direct_download`` (.docx); falls back to ``ggdoc_scraper.scrape_inpage_by_api``.
+         - ``DocumentType.ZIP_FOLDER``:
+           Tries ``pdf_scraper.direct_download``; falls back to ``zip_downloader.download_inpage``.
 
        - **WebsiteType.GOOGLE_DOC**:
          - ``DocumentType.GOOGLE_DOC``:
@@ -321,6 +324,14 @@ async def start_scraping(
                 return direct_path
 
             return await _call_inpage_scraper(ggdoc_scraper.scrape_inpage_by_api)
+
+        if template_info.document_type == DocumentType.ZIP_FOLDER:
+            direct_path = await try_direct_download(
+                pdf_scraper.direct_download, document_name
+            )
+            if direct_path is not None:
+                return direct_path
+            return await _call_inpage_scraper(zip_downloader.download_inpage)
 
         doc_type_name = (
             template_info.document_type.name
