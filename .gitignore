@@ -8,3 +8,5 @@ __pycache__/
 .browser_profile/
 dist/
 links.txt
+build/
+scrape.spec
