@@ -1,7 +1,7 @@
 # Document Scraper
 
-A powerful CLI web scraping tool that supports various types of documents — including PDF, PPTX, DOCX, Google Docs, images, ZIP archives, and Google Drive folders — as well as scraping documents from the Scribd platform.
-
+A powerful CLI web scraping tool that supports various types of documents — including PDF, PPTX, DOCX, Google Docs, images, ZIP archives, and Google Drive folders — as well as scraping documents from the Scribd platform.  
+*No log in required*
 ## Installation
 
 ### Linux & macOS
